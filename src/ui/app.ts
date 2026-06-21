@@ -266,6 +266,7 @@ function handlePreviewMove(move: CubeMove): void {
   if (!scene3d || !schematic) return;
   const previewBoard = applyCubeMove(gameState.board, move);
   scene3d.showPreview(previewBoard, gameState.board);
+  scene3d.highlightCubeMove(move);
   schematic.update(gameState.board, [], selectedFrom, previewBoard);
   // NOTE: controls panel updates itself in-place; no full re-render needed here
 }
@@ -273,6 +274,7 @@ function handlePreviewMove(move: CubeMove): void {
 function handlePreviewClear(): void {
   if (!scene3d || !schematic) return;
   scene3d.clearPreview();
+  scene3d.highlightCubeMove(null);
   refresh();
 }
 
@@ -357,6 +359,7 @@ async function handleCubeMove(move: CubeMove): Promise<void> {
   if (isAnimating) return;
   isAnimating = true;
   scene3d!.clearPreview();
+  scene3d!.highlightCubeMove(null);
 
   const next = resolveAfterCubeMove(gameState, move);
 

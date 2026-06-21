@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { Mark, Player } from '../core/types';
+import type { Mark, Player, CubeMove } from '../core/types';
 import { fromIndex } from '../core/board';
 import { LINES } from '../core/lines';
 
@@ -75,6 +75,7 @@ export class Scene3D {
   private camera: THREE.PerspectiveCamera;
   private spheres: THREE.Mesh[] = [];
   private previewMeshes: THREE.Mesh[] = [];
+  private moveHighlightGroup: THREE.Group | null = null;
 
   private currentBoard: Mark[] = Array(27).fill(null);
 
@@ -195,6 +196,63 @@ export class Scene3D {
     for (const m of this.previewMeshes) this.scene.remove(m);
     this.previewMeshes = [];
     this.updateBoard(this.currentBoard);
+  }
+
+  // ── Move highlight (which cells/axis a selected cube operation affects) ───
+  highlightCubeMove(move: CubeMove | null): void {
+    if (this.moveHighlightGroup) {
+      this.scene.remove(this.moveHighlightGroup);
+      this.moveHighlightGroup = null;
+    }
+    if (!move) return;
+
+    const axisColor = move.axis === 'X' ? 0x00e5ff : move.axis === 'Y' ? 0xff44ee : 0xffee00;
+    const group = new THREE.Group();
+    const span = CELL_SIZE * 3 + 0.1;
+
+    if (move.kind === 'rotate') {
+      const size: [number, number, number] = [span, span, span];
+      if (move.axis === 'X') size[0] = CELL_SIZE + 0.05;
+      if (move.axis === 'Y') size[1] = CELL_SIZE + 0.05;
+      if (move.axis === 'Z') size[2] = CELL_SIZE + 0.05;
+      const geo = new THREE.BoxGeometry(...size);
+      const box = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        color: axisColor, transparent: true, opacity: 0.28, depthWrite: false,
+      }));
+      box.renderOrder = 10;
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geo),
+        new THREE.LineBasicMaterial({ color: axisColor, transparent: true, opacity: 1, depthTest: false }),
+      );
+      edges.renderOrder = 11;
+      const pivotPos = layerPivot(move.axis, move.layer);
+      box.position.copy(pivotPos);
+      edges.position.copy(pivotPos);
+      group.add(box, edges);
+    } else {
+      const sign = move.dir === 'forward' ? -1 : 1;
+      const dirVec = new THREE.Vector3(
+        move.axis === 'X' ? sign : 0,
+        move.axis === 'Y' ? sign : 0,
+        move.axis === 'Z' ? sign : 0,
+      );
+      const length = span * 1.15;
+      const origin = dirVec.clone().multiplyScalar(-length / 2);
+      const arrow = new THREE.ArrowHelper(dirVec, origin, length, axisColor, 0.55, 0.32);
+      arrow.line.material = new THREE.LineBasicMaterial({ color: axisColor, depthTest: false, linewidth: 2 });
+      arrow.cone.material = new THREE.MeshBasicMaterial({ color: axisColor, depthTest: false });
+      arrow.renderOrder = 11;
+      group.add(arrow);
+
+      const wfGeo = new THREE.BoxGeometry(span, span, span);
+      group.add(new THREE.LineSegments(
+        new THREE.EdgesGeometry(wfGeo),
+        new THREE.LineBasicMaterial({ color: axisColor, transparent: true, opacity: 0.5, depthTest: false }),
+      ));
+    }
+
+    this.scene.add(group);
+    this.moveHighlightGroup = group;
   }
 
   // ── Win flash ─────────────────────────────────────────────────────────

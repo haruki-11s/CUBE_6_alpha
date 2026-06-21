@@ -92,13 +92,13 @@ export class Controls {
     this.container.appendChild(heading);
 
     // Rotate
-    this.container.appendChild(sectionLabel('▸ 回転'));
+    this.container.appendChild(sectionLabel('▸ 回転（枠の色＝3D表示のハイライト色）'));
     for (const axis of ['X', 'Y', 'Z'] as const) {
       for (const layer of [0, 1, 2] as const) {
         const row = document.createElement('div');
         row.style.cssText = 'display:flex;gap:3px;align-items:center;margin-bottom:2px;';
         const lbl = document.createElement('span');
-        lbl.style.cssText = 'font-size:.68rem;color:#556;width:56px;flex-shrink:0;';
+        lbl.style.cssText = `font-size:.68rem;color:${axisColor(axis)};width:56px;flex-shrink:0;font-weight:bold;`;
         lbl.textContent = `${axis}軸 層${layer}:`;
         row.appendChild(lbl);
         for (const dir of ['CW', 'CCW'] as const) {
@@ -117,7 +117,7 @@ export class Controls {
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;gap:3px;align-items:center;margin-bottom:2px;';
       const lbl = document.createElement('span');
-      lbl.style.cssText = 'font-size:.68rem;color:#556;width:56px;flex-shrink:0;';
+      lbl.style.cssText = `font-size:.68rem;color:${axisColor(axis)};width:56px;flex-shrink:0;font-weight:bold;`;
       lbl.textContent = `${axis}軸:`;
       row.appendChild(lbl);
       for (const dir of ['forward', 'backward'] as const) {
@@ -210,8 +210,8 @@ export class Controls {
     if (this.selectionLabel) {
       this.selectionLabel.textContent = has
         ? `選択中: ${this._moveLabel(this.pendingMove!)}`
-        : '↑ 操作を選択してください';
-      this.selectionLabel.style.color = has ? '#88ffbb' : '#667';
+        : '↑ 操作を選択してください（3D表示に色付き枠/矢印で表示されます）';
+      this.selectionLabel.style.color = has ? axisColor(this.pendingMove!.axis) : '#667';
     }
     if (this.confirmBtn) {
       this.confirmBtn.disabled = !has;
@@ -254,3 +254,6 @@ function sectionLabel(text: string): HTMLDivElement {
   return d;
 }
 function mkey(m: CubeMove): string { return JSON.stringify(m); }
+function axisColor(axis: 'X' | 'Y' | 'Z'): string {
+  return axis === 'X' ? '#00e5ff' : axis === 'Y' ? '#ff44ee' : '#ffee00';
+}
