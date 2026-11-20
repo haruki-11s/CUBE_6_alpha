@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { generateLines, checkWinner } from '../src/core/lines';
+import { generateLines, checkWinner, completedLines } from '../src/core/lines';
 import { toIndex, emptyBoard } from '../src/core/board';
 import type { Mark } from '../src/core/types';
 
@@ -59,6 +59,17 @@ describe('checkWinner', () => {
     b[toIndex(1,1,1)] = 'X';
     b[toIndex(2,2,2)] = 'X';
     expect(checkWinner(b)).toBe('X');
+  });
+
+  it('completedLines lists every finished line, optionally per player', () => {
+    const b = emptyBoard();
+    b[toIndex(0,0,0)] = 'O'; b[toIndex(1,0,0)] = 'O'; b[toIndex(2,0,0)] = 'O';
+    b[toIndex(0,0,1)] = 'O'; b[toIndex(0,0,2)] = 'O';           // second O line along z
+    b[toIndex(0,2,0)] = 'X'; b[toIndex(1,2,0)] = 'X'; b[toIndex(2,2,0)] = 'X';
+    expect(completedLines(b)).toHaveLength(3);
+    expect(completedLines(b, 'O')).toHaveLength(2);
+    expect(completedLines(b, 'X')).toEqual([[toIndex(0,2,0), toIndex(1,2,0), toIndex(2,2,0)]]);
+    expect(completedLines(emptyBoard())).toHaveLength(0);
   });
 
   it('returns null when no winner', () => {

@@ -43,6 +43,14 @@ export function checkWinner(board: Mark[]): Player | null {
   return null;
 }
 
+/** All complete lines on the board (optionally only those of `player`). */
+export function completedLines(board: Mark[], player?: Player): Line[] {
+  return LINES.filter(([a, b, c]) => {
+    const m = board[a];
+    return m !== null && m === board[b] && m === board[c] && (player === undefined || m === player);
+  });
+}
+
 export function checkBothWin(board: Mark[]): { O: boolean; X: boolean } {
   let O = false, X = false;
   for (const [a, b, c] of LINES) {

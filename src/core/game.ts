@@ -1,4 +1,7 @@
 export { initialGameState } from './board';
-export { legalPlacements, legalMoves, legalCubeMoves, applyFullTurn, checkStep1Win, applyStep1Place, applyStep1Move, resolveAfterCubeMove } from './rules';
-export { applyCubeMove } from './cube';
-export { checkWinner, checkBothWin } from './lines';
+export {
+  legalPlacements, legalMoves, legalCubeMoves, allCubeMoves, applyFullTurn, checkStep1Win,
+  applyStep1Place, applyStep1Move, resolveAfterCubeMove, canPlace,
+} from './rules';
+export { applyCubeMove, movePermutation, moveKey, movesEqual, invertMove } from './cube';
+export { checkWinner, checkBothWin, completedLines } from './lines';

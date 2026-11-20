@@ -1,64 +1,78 @@
-import type { Mark, CubeMove } from './types';
+import type { Mark, CubeMove, Axis } from './types';
 import { toIndex, fromIndex } from './board';
 
-export function applyCubeMove(board: Mark[], move: CubeMove): Mark[] {
-  const next = board.slice();
-  if (move.kind === 'rotate') {
-    applyRotate(next, move.axis, move.layer, move.dir);
-  } else {
-    applySlide(next, move.axis, move.dir);
-  }
-  return next;
+/*
+ * Geometry conventions — shared by the game logic AND the 3D renderer.
+ *
+ *  rotate  'CCW' = +90° right-hand rotation about the positive axis, i.e.
+ *          counter-clockwise when viewed from the + end of the axis looking
+ *          toward the centre. 'CW' is the opposite. Identical for X, Y and Z.
+ *  slide   'forward'  shifts every cell by −1 along the axis (0 wraps to 2),
+ *          'backward' shifts every cell by +1 along the axis (2 wraps to 0).
+ *
+ * tests/geometry.test.ts verifies these conventions against rotation matrices,
+ * so the animation and the rules can never drift apart again.
+ */
+
+export const AXIS_INDEX: Readonly<Record<Axis, 0 | 1 | 2>> = { X: 0, Y: 1, Z: 2 };
+
+export function moveKey(m: CubeMove): string {
+  return m.kind === 'rotate' ? `r${m.axis}${m.layer}${m.dir}` : `s${m.axis}${m.dir}`;
 }
 
-function applyRotate(
-  board: Mark[],
-  axis: 'X' | 'Y' | 'Z',
-  layer: 0 | 1 | 2,
-  dir: 'CW' | 'CCW',
-): void {
-  // Collect the 9 indices in the layer and their rotated destinations
-  const pairs: [number, number][] = []; // [from, to]
+const permCache = new Map<string, readonly number[]>();
 
-  for (let a = 0; a <= 2; a++) {
-    for (let b = 0; b <= 2; b++) {
-      let x: number, y: number, z: number;
-      let nx: number, ny: number, nz: number;
+/** perm[i] = destination index of the piece currently on cell i. */
+export function movePermutation(move: CubeMove): readonly number[] {
+  const key = moveKey(move);
+  const hit = permCache.get(key);
+  if (hit) return hit;
 
-      if (axis === 'Z') {
-        x = a; y = b; z = layer;
-        if (dir === 'CCW') { nx = 2 - y; ny = x; nz = z; }
-        else               { nx = y;     ny = 2 - x; nz = z; }
-      } else if (axis === 'X') {
-        x = layer; y = a; z = b;
-        if (dir === 'CCW') { nx = x; ny = 2 - z; nz = y; }
-        else               { nx = x; ny = z;     nz = 2 - y; }
-      } else { // Y
-        x = b; y = layer; z = a;
-        if (dir === 'CCW') { nx = 2 - z; ny = y; nz = x; }
-        else               { nx = z;     ny = y; nz = 2 - x; }
-      }
-      pairs.push([toIndex(x, y, z), toIndex(nx, ny, nz)]);
-    }
-  }
-
-  const snapshot = board.slice();
-  for (const [from, to] of pairs) {
-    board[to] = snapshot[from];
-  }
-}
-
-function applySlide(board: Mark[], axis: 'X' | 'Y' | 'Z', dir: 'forward' | 'backward'): void {
-  // forward: c → (c-1) mod 3,  backward: c → (c+1) mod 3
-  const snapshot = board.slice();
+  const perm: number[] = [];
   for (let i = 0; i < 27; i++) {
     const [x, y, z] = fromIndex(i);
     let nx = x, ny = y, nz = z;
-    if (axis === 'X') nx = dir === 'forward' ? (x + 2) % 3 : (x + 1) % 3;
-    else if (axis === 'Y') ny = dir === 'forward' ? (y + 2) % 3 : (y + 1) % 3;
-    else nz = dir === 'forward' ? (z + 2) % 3 : (z + 1) % 3;
-    board[toIndex(nx, ny, nz)] = snapshot[i];
+    if (move.kind === 'rotate') {
+      const c = [x, y, z][AXIS_INDEX[move.axis]];
+      if (c === move.layer) {
+        const ccw = move.dir === 'CCW';
+        if (move.axis === 'X') {        // (y, z) → CCW: (2 − z, y)
+          ny = ccw ? 2 - z : z;
+          nz = ccw ? y : 2 - y;
+        } else if (move.axis === 'Y') { // (z, x) → CCW: (x, z) ↦ (z, 2 − x)
+          nx = ccw ? z : 2 - z;
+          nz = ccw ? 2 - x : x;
+        } else {                        // (x, y) → CCW: (2 − y, x)
+          nx = ccw ? 2 - y : y;
+          ny = ccw ? x : 2 - x;
+        }
+      }
+    } else {
+      const step = move.dir === 'forward' ? 2 : 1; // −1 or +1 (mod 3)
+      if (move.axis === 'X') nx = (x + step) % 3;
+      else if (move.axis === 'Y') ny = (y + step) % 3;
+      else nz = (z + step) % 3;
+    }
+    perm.push(toIndex(nx, ny, nz));
   }
+  const frozen = Object.freeze(perm);
+  permCache.set(key, frozen);
+  return frozen;
+}
+
+export function applyCubeMove(board: Mark[], move: CubeMove): Mark[] {
+  const perm = movePermutation(move);
+  const next = board.slice();
+  for (let i = 0; i < 27; i++) next[perm[i]] = board[i];
+  return next;
+}
+
+/** Indices of the 9 cells whose coordinate on `axis` equals `layer`. */
+export function layerCells(axis: Axis, layer: number): number[] {
+  const out: number[] = [];
+  const a = AXIS_INDEX[axis];
+  for (let i = 0; i < 27; i++) if (fromIndex(i)[a] === layer) out.push(i);
+  return out;
 }
 
 export function invertMove(move: CubeMove): CubeMove {
@@ -69,12 +83,5 @@ export function invertMove(move: CubeMove): CubeMove {
 }
 
 export function movesEqual(a: CubeMove, b: CubeMove): boolean {
-  if (a.kind !== b.kind) return false;
-  if (a.kind === 'rotate' && b.kind === 'rotate') {
-    return a.axis === b.axis && a.layer === b.layer && a.dir === b.dir;
-  }
-  if (a.kind === 'slide' && b.kind === 'slide') {
-    return a.axis === b.axis && a.dir === b.dir;
-  }
-  return false;
+  return moveKey(a) === moveKey(b);
 }

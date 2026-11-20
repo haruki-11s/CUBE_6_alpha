@@ -1,143 +1,156 @@
-import type { Mark } from '../core/types';
-import { toIndex } from '../core/board';
+import type { CubeMove, Mark } from '../core/types';
+import { toIndex, fromIndex } from '../core/board';
+import { AXIS_INDEX } from '../core/cube';
+import { cellName } from '../core/notation';
+import { AXIS_COLORS } from './theme';
+
+export interface SchematicState {
+  board: Mark[];
+  targets: number[];
+  selected: number | null;
+  lastMoved: number | null;
+  win: number[];
+  /** Candidate cube move: the schematic shows the board *after* it. */
+  preview: { move: CubeMove; after: Mark[] } | null;
+  /** Move whose layer / slice should be outlined (candidate or opponent's last move). */
+  guide: CubeMove | null;
+}
+
+const LAYER_NAMES = ['下層', '中層', '上層'];
 
 /**
- * 見取り図 ― 水平3層を上から見た 3×3 グリッドを3段表示。
- * 上段 = y=2, 中段 = y=1, 下段 = y=0。
+ * 見取り図 — top view of the three horizontal layers (y = 2 / 1 / 0),
+ * columns = x (→), rows = z (↓). Clicking / hovering is mirrored in 3D.
  */
 export class Schematic {
-  /** cells[y][z*3+x] = cell element for board index toIndex(x,y,z) */
-  private cells: HTMLElement[][] = [];
-  private dots: HTMLElement[][] = [];   // ghost overlay dots
-  private onCellClick?: (index: number) => void;
+  onCellClick?: (index: number) => void;
+  onCellHover?: (index: number | null) => void;
 
-  constructor(private container: HTMLElement) {
-    this.build();
-  }
+  private readonly cells: HTMLButtonElement[] = [];
+  private readonly layers: HTMLElement[] = [];
+  private readonly layerTags: HTMLElement[] = [];
+  private readonly badge: HTMLElement;
+  private readonly legendX: HTMLElement;
+  private readonly legendZ: HTMLElement;
+  private readonly note: HTMLElement;
+  private hover: number | null = null;
 
-  private build(): void {
-    this.container.innerHTML = '';
-    this.container.style.cssText = `
-      display:flex;flex-direction:column;gap:6px;
-      padding:10px;background:#0d0d18;border-radius:8px;border:1px solid #223;
-    `;
+  constructor(container: HTMLElement) {
+    container.innerHTML = `
+      <div class="sch">
+        <div class="sch-head">
+          <span class="sch-title">見取り図</span>
+          <span class="sch-badge" hidden>操作後</span>
+        </div>
+        <div class="sch-legend">
+          <span class="lg ax-x" data-ax="x">x →</span>
+          <span class="lg ax-z" data-ax="z">z ↓</span>
+          <span class="sch-note">上から見た図</span>
+        </div>
+        <div class="sch-layers"></div>
+      </div>`;
+    this.badge = container.querySelector('.sch-badge') as HTMLElement;
+    this.legendX = container.querySelector('[data-ax="x"]') as HTMLElement;
+    this.legendZ = container.querySelector('[data-ax="z"]') as HTMLElement;
+    this.note = container.querySelector('.sch-note') as HTMLElement;
+    const layersEl = container.querySelector('.sch-layers') as HTMLElement;
 
-    const title = document.createElement('div');
-    title.textContent = '見取り図';
-    title.style.cssText = 'color:#88aacc;font-size:.73rem;letter-spacing:.1em;text-align:center;';
-    this.container.appendChild(title);
-
-    for (let y = 2; y >= 0; y--) {
-      const wrap = document.createElement('div');
-      wrap.style.cssText = 'display:flex;flex-direction:column;gap:2px;';
-
-      const lbl = document.createElement('div');
-      lbl.textContent = ['下層 y=0', '中層 y=1', '上層 y=2'][y];
-      lbl.style.cssText = 'color:#445;font-size:.62rem;text-align:center;';
-      wrap.appendChild(lbl);
-
+    for (const y of [2, 1, 0]) {
+      const layer = document.createElement('div');
+      layer.className = 'sch-layer';
+      const label = document.createElement('div');
+      label.className = 'sch-layer-label';
+      label.innerHTML = `<span class="ax-y">Y${y}</span><span>${LAYER_NAMES[y]}</span>`;
+      const tag = document.createElement('span');
+      tag.className = 'sch-tag';
+      label.appendChild(tag);
       const grid = document.createElement('div');
-      grid.style.cssText = 'display:grid;grid-template-columns:repeat(3,1fr);gap:2px;';
-
-      const rowCells: HTMLElement[] = [];
-      const rowDots: HTMLElement[] = [];
-
-      for (let z = 0; z <= 2; z++) {
-        for (let x = 0; x <= 2; x++) {
-          const cell = document.createElement('div');
-          cell.style.cssText = `
-            width:32px;height:32px;border-radius:50%;
-            display:flex;align-items:center;justify-content:center;
-            font-size:.8rem;cursor:pointer;position:relative;
-            border:1px solid #334;background:#111120;color:#445;
-            transition:background .12s,border-color .12s;
-          `;
+      grid.className = 'sch-grid';
+      for (let z = 0; z < 3; z++) {
+        for (let x = 0; x < 3; x++) {
           const idx = toIndex(x, y, z);
-          cell.dataset['idx'] = String(idx);
-          cell.addEventListener('click', () => this.onCellClick?.(idx));
-
-          // ghost dot (for preview overlay)
-          const dot = document.createElement('span');
-          dot.style.cssText = `
-            position:absolute;bottom:1px;right:2px;
-            font-size:.45rem;line-height:1;opacity:0;pointer-events:none;
-          `;
-          cell.appendChild(dot);
-
-          grid.appendChild(cell);
-          rowCells.push(cell);
-          rowDots.push(dot);
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'sch-cell';
+          b.innerHTML = '<span class="sym" aria-hidden="true"></span>';
+          b.addEventListener('click', () => this.onCellClick?.(idx));
+          b.addEventListener('pointerenter', e => { if (e.pointerType !== 'touch') this.onCellHover?.(idx); });
+          b.addEventListener('pointerleave', () => this.onCellHover?.(null));
+          b.addEventListener('focus', () => this.onCellHover?.(idx));
+          b.addEventListener('blur', () => this.onCellHover?.(null));
+          grid.appendChild(b);
+          this.cells[idx] = b;
         }
       }
-      this.cells[y] = rowCells;
-      this.dots[y] = rowDots;
-      wrap.appendChild(grid);
-      this.container.appendChild(wrap);
+      layer.append(label, grid);
+      layersEl.appendChild(layer);
+      this.layers[y] = layer;
+      this.layerTags[y] = tag;
     }
   }
 
-  update(
-    board: Mark[],
-    highlights: number[] = [],
-    selected: number | null = null,
-    previewBoard?: Mark[],
-  ): void {
-    const hl = new Set(highlights);
-    for (let y = 0; y <= 2; y++) {
-      for (let z = 0; z <= 2; z++) {
-        for (let x = 0; x <= 2; x++) {
-          const idx = toIndex(x, y, z);
-          const cell = this.cells[y][z * 3 + x];
-          const dot  = this.dots[y][z * 3 + x];
-          const mark = board[idx];
-          const isHl  = hl.has(idx);
-          const isSel = selected === idx;
+  update(s: SchematicState): void {
+    const shown = s.preview ? s.preview.after : s.board;
+    const targets = new Set(s.targets);
+    const win = new Set(s.win);
+    const affected = new Set<number>();
+    const entering = new Set<number>();
+    const g = s.guide;
+    const hl = g ? AXIS_COLORS[g.axis].css : '';
 
-          // ── Main cell style ──
-          cell.style.opacity = '1';
-          if (mark === 'O') {
-            cell.style.background = isSel ? '#6699ff' : '#1b3580';
-            cell.style.border = `2px solid ${isSel ? '#88bbff' : '#4488ff'}`;
-            cell.style.color = '#ddeeff';
-            cell.textContent = '○';
-          } else if (mark === 'X') {
-            cell.style.background = isSel ? '#ff6677' : '#7a1525';
-            cell.style.border = `2px solid ${isSel ? '#ff99aa' : '#ff3344'}`;
-            cell.style.color = '#ffdddd';
-            cell.textContent = '×';
-          } else if (isHl) {
-            cell.style.background = 'rgba(80,60,0,.35)';
-            cell.style.border = '1px solid rgba(255,238,68,.5)';
-            cell.style.color = 'rgba(255,238,68,.6)';
-            cell.textContent = '·';
-          } else {
-            cell.style.background = '#111120';
-            cell.style.border = '1px solid #334';
-            cell.style.color = '#445';
-            cell.textContent = '';
-          }
-
-          // ── Preview ghost dot ──
-          if (previewBoard && previewBoard[idx] !== board[idx]) {
-            const pMark = previewBoard[idx];
-            if (pMark !== null) {
-              dot.textContent = pMark === 'O' ? '○' : '×';
-              dot.style.color  = pMark === 'O' ? 'rgba(100,180,255,.9)' : 'rgba(255,120,140,.9)';
-              dot.style.opacity = '1';
-            } else {
-              dot.style.opacity = '0';
-            }
-            if (mark !== null && pMark === null) cell.style.opacity = '0.45';
-          } else {
-            dot.style.opacity = '0';
-          }
-
-          // Re-append dot to keep it on top of textContent
-          if (!cell.contains(dot)) cell.appendChild(dot);
-        }
+    if (g) {
+      const a = AXIS_INDEX[g.axis];
+      for (let i = 0; i < 27; i++) {
+        const c = fromIndex(i)[a];
+        if (g.kind === 'rotate' && c === g.layer) affected.add(i);
+        // after a slide, the slice on the far side received the wrapped pieces
+        if (g.kind === 'slide' && c === (g.dir === 'forward' ? 2 : 0)) entering.add(i);
       }
     }
+
+    for (let i = 0; i < 27; i++) {
+      const b = this.cells[i];
+      const m = shown[i];
+      const cl = b.classList;
+      cl.toggle('o', m === 'O');
+      cl.toggle('x', m === 'X');
+      cl.toggle('target', targets.has(i));
+      cl.toggle('sel', s.selected === i);
+      cl.toggle('last', s.lastMoved === i && !s.preview && !win.size);
+      cl.toggle('win', win.has(i));
+      cl.toggle('affected', affected.has(i));
+      cl.toggle('entering', entering.has(i));
+      cl.toggle('changed', !!s.preview && m !== s.board[i]);
+      b.style.setProperty('--hl', hl);
+      (b.firstElementChild as HTMLElement).textContent = m === 'O' ? '○' : m === 'X' ? '×' : '';
+      const state = m === 'O' ? '〇' : m === 'X' ? '×' : '空き';
+      b.setAttribute('aria-label', `${cellName(i)} ${state}${targets.has(i) ? '（選択可）' : ''}`);
+    }
+
+    // per-layer decoration (Y rotations rotate a whole grid; Y slides move grids up/down)
+    for (let y = 0; y < 3; y++) {
+      const L = this.layers[y];
+      L.style.setProperty('--hl', hl);
+      let tag = '';
+      if (g?.axis === 'Y' && g.kind === 'rotate' && g.layer === y) tag = g.dir === 'CCW' ? '↺ 回転' : '↻ 回転';
+      if (g?.axis === 'Y' && g.kind === 'slide') tag = g.dir === 'forward' ? '↓ 1層下へ' : '↑ 1層上へ';
+      L.classList.toggle('affected', !!tag);
+      this.layerTags[y].textContent = tag;
+    }
+
+    // legend: direction of X / Z slides, highlight the axis in use
+    this.legendX.textContent = g?.axis === 'X' && g.kind === 'slide' ? (g.dir === 'forward' ? 'x ← 繰越' : 'x → 繰越') : 'x →';
+    this.legendZ.textContent = g?.axis === 'Z' && g.kind === 'slide' ? (g.dir === 'forward' ? 'z ↑ 繰越' : 'z ↓ 繰越') : 'z ↓';
+    this.legendX.classList.toggle('on', g?.axis === 'X');
+    this.legendZ.classList.toggle('on', g?.axis === 'Z');
+    this.note.textContent = s.preview ? '確定後の配置' : '上から見た図';
+    this.badge.hidden = !s.preview;
   }
 
-  setOnCellClick(cb: (index: number) => void): void { this.onCellClick = cb; }
+  setHover(i: number | null): void {
+    if (this.hover === i) return;
+    if (this.hover !== null) this.cells[this.hover]?.classList.remove('hover');
+    this.hover = i;
+    if (i !== null) this.cells[i]?.classList.add('hover');
+  }
 }

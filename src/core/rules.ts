@@ -1,4 +1,4 @@
-import type { Mark, CubeMove, GameState } from './types';
+import type { Mark, CubeMove, GameState, Step1Action } from './types';
 import { countOnBoard } from './board';
 import { applyCubeMove, invertMove, movesEqual } from './cube';
 export { invertMove } from './cube';
@@ -117,10 +117,10 @@ export function checkStep1Win(state: GameState): boolean {
 
 export function applyFullTurn(
   state: GameState,
-  step1: { kind: 'place'; index: number } | { kind: 'move'; from: number; to: number },
+  step1: Step1Action,
   cubeMove: CubeMove,
 ): GameState {
-  let s = step1.kind === 'place'
+  const s = step1.kind === 'place'
     ? applyStep1Place(state, step1.index)
     : applyStep1Move(state, step1.from, step1.to);
 
