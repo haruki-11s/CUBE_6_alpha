@@ -10,6 +10,8 @@ export interface SchematicState {
   selected: number | null;
   lastMoved: number | null;
   win: number[];
+  /** Cells of the line(s) putting the player to move in check (王手). */
+  check: number[];
   /** Candidate cube move: the schematic shows the board *after* it. */
   preview: { move: CubeMove; after: Mark[] } | null;
   /** Move whose layer / slice should be outlined (candidate or opponent's last move). */
@@ -93,6 +95,7 @@ export class Schematic {
     const shown = s.preview ? s.preview.after : s.board;
     const targets = new Set(s.targets);
     const win = new Set(s.win);
+    const check = new Set(s.preview ? [] : s.check);
     const affected = new Set<number>();
     const entering = new Set<number>();
     const g = s.guide;
@@ -118,6 +121,7 @@ export class Schematic {
       cl.toggle('sel', s.selected === i);
       cl.toggle('last', s.lastMoved === i && !s.preview && !win.size);
       cl.toggle('win', win.has(i));
+      cl.toggle('check', check.has(i) && !win.has(i));
       cl.toggle('affected', affected.has(i));
       cl.toggle('entering', entering.has(i));
       cl.toggle('changed', !!s.preview && m !== s.board[i]);

@@ -152,6 +152,17 @@ class SoundEngine {
     this.tone({ f: 150, type: 'square', dur: 0.13, gain: 0.04, lp: 900 });
     this.tone({ f: 158, type: 'square', dur: 0.13, gain: 0.03, lp: 900 });
   }
+  // ── Clock ─────────────────────────────────────────────────────────────
+  /** 秒読み countdown: a soft tick, or a sharper one for the last seconds. */
+  tick(urgent = false): void {
+    this.tone({ f: urgent ? 1760 : 1320, dur: urgent ? 0.07 : 0.05, gain: urgent ? 0.085 : 0.05, type: 'triangle' });
+  }
+  /** Main time used up: from now on every turn is on 秒読み. */
+  byoyomi(): void {
+    this.tone({ f: 988, dur: 0.11, gain: 0.08, type: 'triangle' });
+    this.tone({ f: 988, at: 0.15, dur: 0.11, gain: 0.08, type: 'triangle' });
+    this.tone({ f: 1319, at: 0.3, dur: 0.2, gain: 0.07, type: 'triangle' });
+  }
   start(): void {
     [392, C5, E5, G5].forEach((f, i) => this.tone({ f, at: i * 0.07, dur: 0.3, gain: 0.07, type: 'triangle' }));
   }
@@ -200,6 +211,12 @@ class SoundEngine {
     this.tone({ f: f * 2.01, dur: 0.3, gain: 0.02 });
     this.tone({ f: f * 1.5, at: 0.09, dur: 0.5, gain: 0.035 });
   }
+  /** 王手: a short two-note alarm. */
+  check(): void {
+    this.tone({ f: 988, dur: 0.12, gain: 0.08, type: 'square', lp: 2600 });
+    this.tone({ f: 1318.5, at: 0.13, dur: 0.22, gain: 0.08, type: 'square', lp: 2600 });
+    this.tone({ f: 659.25, at: 0.13, dur: 0.3, gain: 0.05, type: 'triangle' });
+  }
   undo(): void {
     this.tone({ f: 600, f2: 900, dur: 0.07, gain: 0.06, type: 'triangle' });
     this.tone({ f: 900, f2: 520, at: 0.06, dur: 0.12, gain: 0.06, type: 'triangle' });
@@ -212,10 +229,25 @@ class SoundEngine {
     this.tone({ f: C6, at: offset + 0.5, dur: 1.4, gain: 0.045, type: 'triangle' });
     this.noise({ type: 'highpass', f: 6000, at: offset + 0.5, dur: 0.9, gain: 0.035, attack: 0.2 });
   }
-  selfDestruct(): void {
+  /** Defeat against the CPU: a soft, falling minor phrase. */
+  lose(offset = 0): void {
+    [440, 349.23, 293.66].forEach((f, i) => this.tone({ f, at: offset + i * 0.2, dur: 0.5, gain: 0.08, type: 'triangle' }));
+    this.tone({ f: 220, at: offset + 0.62, dur: 1.3, gain: 0.07, type: 'triangle' });
+    this.tone({ f: 261.63, at: offset + 0.62, dur: 1.3, gain: 0.035 });
+  }
+  /** Boom, then the winner's fanfare — or `lose()` when the listener is the one who lost. */
+  selfDestruct(listenerWins = true): void {
     this.noise({ type: 'lowpass', f: 1600, f2: 90, dur: 0.75, gain: 0.3 });
     this.tone({ f: 110, f2: 40, dur: 0.6, gain: 0.28 });
-    this.win(0.55);
+    if (listenerWins) this.win(0.55);
+    else this.lose(0.55);
+  }
+  /** Hidden level unlocked: a sparkling rise. */
+  secret(offset = 0): void {
+    [C5, E5, G5, C6, 1318.5, 1568].forEach((f, i) =>
+      this.tone({ f, at: offset + i * 0.075, dur: 0.5, gain: 0.07, type: 'triangle' }));
+    this.tone({ f: 2093, at: offset + 0.5, dur: 1.4, gain: 0.04 });
+    this.noise({ type: 'highpass', f: 7000, at: offset + 0.45, dur: 1.2, gain: 0.05, attack: 0.3 });
   }
   draw(): void {
     this.tone({ f: C5, dur: 0.7, gain: 0.07, type: 'triangle' });

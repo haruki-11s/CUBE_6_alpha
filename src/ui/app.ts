@@ -1,21 +1,36 @@
 import { Scene3D, type ViewPreset } from './scene3d';
 import { Schematic, type SchematicState } from './schematic';
-import { Controls, type ControlEvent, type Outcome } from './controls';
+import { Controls, type ClockFace, type ControlEvent, type Outcome } from './controls';
 import {
   initialGameState, legalPlacements, legalCubeMoves, allCubeMoves,
-  applyStep1Place, applyStep1Move, resolveAfterCubeMove, checkStep1Win,
+  applyStep1Place, applyStep1Move, resolveAfterCubeMove,
   applyCubeMove, movePermutation, movesEqual, completedLines,
+  inCheck, checkLines, breakingMoves, isMate,
 } from '../core/game';
-import { parseSave, type LogEntry, type SaveData, type SavedPhase, type Snapshot } from '../core/save';
+import { parseSave, type LogEntry, type MatchInfo, type SaveData, type SavedPhase, type Snapshot } from '../core/save';
 import type { Line } from '../core/lines';
 import type { CubeMove, GameState, Mark, Player } from '../core/types';
+import { LEVEL_PARAMS, type CpuLevel } from '../core/ai';
+import { describeMove, describeStep1 } from '../core/notation';
+import {
+  CLOCK_PRESETS, fmtClock, mainAfterTurn, newClock, presetLabel, turnTime,
+  type ClockInfo, type ClockPreset,
+} from '../core/clock';
 import { sound } from './sound';
-import { loadSettings, saveSettings, SPEED_MULT, TURN_LIMITS, type Settings, type AnimSpeed, type FirstPlayer } from './settings';
+import {
+  loadSettings, saveSettings, SPEED_MULT, TURN_LIMITS,
+  type Settings, type AnimSpeed, type FirstPlayer, type CpuOrder,
+} from './settings';
 import { setAnimSpeed, wait } from './tween';
-import { openModal, isModalOpen, type ModalHandle } from './modal';
+import { openModal, isModalOpen, type ModalAction, type ModalHandle } from './modal';
 import { icon } from './icons';
 import { rulesHTML } from './rules';
 import { APP_VERSION, PLAYER_COLORS, other } from './theme';
+import { CpuClient } from './cpu';
+import {
+  CPU_LEVELS, NORMAL_LEVELS, HIDDEN_LEVEL, levelLabel, loadProgress, recordResult,
+  type GameResult, type LevelRecord,
+} from './cpuProfile';
 
 type Phase = SavedPhase;
 
@@ -50,9 +65,32 @@ let selectedMove: CubeMove | null = null;
 let peekLast = false;
 let resultModal: ModalHandle | null = null;
 
+// ── Opponent: a second person on this device, or the CPU ─────────────────────
+let match: MatchInfo = { mode: 'local', undos: 0 };
+let cpu: CpuClient | null = null;
+/** The CPU's turn is in progress (thinking or showing its move): the human can only watch / take back. */
+let cpuActing = false;
+/** Bumped to abandon a CPU turn (待った, quitting, new game). */
+let cpuToken = 0;
+/** The finished game's result as counted in the records (reverted by 待った). */
+let recorded: { level: CpuLevel; result: GameResult } | null = null;
+let justUnlocked = false;
+let lastBusyToast = 0;
+
 let elapsed = 0;
 let clockStart = 0;
 let clockRunning = false;
+
+// ── 持ち時間 (CPU games on a clock) ──
+let tcRunning = false;
+let tcSince = 0;
+let tcTicker = 0;
+/** The CPU's turn is waiting for a dialog to close: its clock is held. */
+let tcHold = false;
+/** Last 秒読み second that was announced (tick sound). */
+let tcAnnounced = -1;
+/** The "main time used up" alert was given this turn. */
+let tcByoShown = false;
 
 const SAVE_KEY = 'cube6-save';
 const HISTORY_MAX = 80;
@@ -64,7 +102,11 @@ function snapshot(): Snapshot {
 
 function persist(): void {
   if (gs.status !== 'playing') { clearSave(); return; }
-  const data: SaveData = { v: 2, ...snapshot(), history: history.slice(-HISTORY_MAX), elapsed: currentElapsed() };
+  // the clock in the save includes the time already spent on the turn in progress
+  const m: MatchInfo = match.mode === 'cpu' && match.clock
+    ? { ...match, clock: { ...match.clock, left: { ...match.clock.left }, used: tcUsed(match.clock) } }
+    : match;
+  const data: SaveData = { v: 2, ...snapshot(), history: history.slice(-HISTORY_MAX), elapsed: currentElapsed(), match: m };
   try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch { /* quota / private mode */ }
 }
 
@@ -96,6 +138,101 @@ function fmtTime(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
+// ── 持ち時間: main time, then 秒読み for every turn; running out loses ──────
+function gameClock(): ClockInfo | null {
+  return match.mode === 'cpu' ? match.clock : null;
+}
+function tcUsed(c: ClockInfo): number {
+  return c.used + (tcRunning ? performance.now() - tcSince : 0);
+}
+/** Start / resume the clock of the player to move. */
+function tcStart(): void {
+  if (!gameClock() || !ui || tcRunning || tcHold || gs.status !== 'playing' || document.hidden) return;
+  tcSince = performance.now();
+  tcRunning = true;
+}
+function tcPause(): void {
+  const c = gameClock();
+  if (!c || !tcRunning) return;
+  c.used += performance.now() - tcSince;
+  tcRunning = false;
+}
+/** `p` confirmed its cube move: charge the turn to its main time. */
+function tcEndTurn(p: Player): void {
+  const c = gameClock();
+  if (!c) return;
+  tcPause();
+  c.left[p] = mainAfterTurn(c.left[p], c.used);
+  c.used = 0;
+  tcAnnounced = -1;
+  tcByoShown = false;
+}
+function clockFaces(): Record<Player, ClockFace> | null {
+  const c = gameClock();
+  if (!c) return null;
+  const used = tcUsed(c);
+  const face = (p: Player): ClockFace => {
+    const active = gs.status === 'playing' && gs.current === p;
+    const t = turnTime(c, c.left[p], active ? used : 0);
+    if (t.phase === 'main') return { text: fmtClock(t.ms), state: !active ? 'idle' : t.ms <= 30_000 ? 'low' : 'run' };
+    return { text: `秒読み ${Math.ceil(t.ms / 1000)}`, state: active ? 'byo' : 'idle' };
+  };
+  return { O: face('O'), X: face('X') };
+}
+function renderClocks(): void {
+  if (!ui) return;
+  const f = clockFaces();
+  if (!f) return;
+  ui.controls.setClocks(f);
+  const pc = ui.pill.querySelector<HTMLElement>('[data-pclock]');
+  if (pc) {
+    const cur = f[gs.current];
+    const cls = `pill-clock ${cur.state}`;
+    if (pc.className !== cls) pc.className = cls;
+    const b = pc.querySelector('b');
+    if (b && b.textContent !== cur.text) b.textContent = cur.text;
+  }
+}
+function tcTick(): void {
+  const c = gameClock();
+  if (!c || !ui) return;
+  renderClocks();
+  if (!tcRunning || gs.status !== 'playing' || match.mode !== 'cpu') return;
+  const p = gs.current;
+  const t = turnTime(c, c.left[p], tcUsed(c));
+  if (t.phase === 'out') {
+    if (!busy) timeOut(p); // an animation in progress finishes first
+    return;
+  }
+  if (t.phase !== 'byoyomi' || p !== match.human) return;
+  if (!tcByoShown) {
+    tcByoShown = true;
+    if (c.left[p] > 0) {
+      sound.byoyomi();
+      toast(`持ち時間を使い切りました。ここから1手${c.byoyomiMs / 1000}秒の秒読みです`, 'warn');
+    }
+  }
+  const sec = Math.ceil(t.ms / 1000);
+  if (sec !== tcAnnounced) {
+    tcAnnounced = sec;
+    if (sec <= 5) sound.tick(true);
+    else if (sec % 10 === 0 && sec * 1000 < c.byoyomiMs) sound.tick(false);
+  }
+}
+function timeOut(p: Player): void {
+  if (!ui || gs.status !== 'playing') return;
+  cancelCpu();
+  tcPause();
+  const c = gameClock();
+  if (c) { c.left[p] = 0; c.used = 0; }
+  gs = { ...gs, status: `win:${other(p)}`, winReason: 'timeout' };
+  if (phase === 'step1-move-from') phase = 'step1';
+  selectedFrom = null;
+  selectedMove = null;
+  hoverMove = null;
+  void finishGame();
+}
+
 // ── Settings ───────────────────────────────────────────────────────────────
 function applySettings(): void {
   sound.configure(settings.sound, settings.volume);
@@ -120,9 +257,10 @@ function renderTitle(): void {
   teardownGame();
   teardownTitle();
   const save = readSave();
-  const resumeInfo = save
-    ? `${PLAYER_COLORS[save.gameState.current].symbol}の番・${save.gameState.ply + 1}手目`
-    : '';
+  const resumeInfo = !save ? ''
+    : save.match.mode === 'cpu'
+      ? `VS ${levelLabel(save.match.level)}・${save.gameState.ply + 1}手目`
+      : `ふたりで対戦・${PLAYER_COLORS[save.gameState.current].symbol}の番・${save.gameState.ply + 1}手目`;
   root.innerHTML = `
     <div class="title">
       <div class="title-stage" id="title-stage"></div>
@@ -133,13 +271,14 @@ function renderTitle(): void {
           <p class="subtitle">可変式立体マルバツゲーム</p>
         </div>
         <nav class="menu" aria-label="メニュー">
-          <button type="button" class="menu-btn primary" data-act="start"><span>${icon('play')}ゲーム開始</span><small>NEW GAME</small></button>
+          <button type="button" class="menu-btn primary" data-act="cpu"><span>${icon('cpu')}CPU対戦</span><small>VS CPU</small></button>
+          <button type="button" class="menu-btn" data-act="local"><span>${icon('users')}ふたりで対戦</span><small>2 PLAYERS</small></button>
           ${save ? `<button type="button" class="menu-btn resume" data-act="resume"><span>${icon('resume')}続きから</span><small>${resumeInfo}</small></button>` : ''}
           <button type="button" class="menu-btn" data-act="rules"><span>${icon('help')}ルール説明</span><small>HOW TO PLAY</small></button>
           <button type="button" class="menu-btn" data-act="settings"><span>${icon('sliders')}設定</span><small>SETTINGS</small></button>
         </nav>
       </div>
-      <footer class="title-foot">alpha ver.${APP_VERSION} ・ ローカル2人対戦 ・ 3×3×3 / 49ライン</footer>
+      <footer class="title-foot">alpha ver.${APP_VERSION} ・ CPU対戦／ふたりで対戦 ・ 3×3×3 / 49ライン</footer>
     </div>`;
 
   root.querySelectorAll<HTMLButtonElement>('.menu-btn').forEach(b => {
@@ -147,7 +286,8 @@ function renderTitle(): void {
     b.addEventListener('click', () => {
       sound.click();
       const act = b.dataset['act'];
-      if (act === 'start') requestNewGame();
+      if (act === 'cpu') openCpuSetup();
+      else if (act === 'local') requestNewGame({ mode: 'local', undos: 0 });
       else if (act === 'resume') resumeGame();
       else if (act === 'rules') showRules();
       else if (act === 'settings') showSettings();
@@ -209,23 +349,121 @@ function teardownTitle(): void {
 
 // ═══════════════════════════════ Game screen ═══════════════════════════════
 
-function requestNewGame(): void {
+function requestNewGame(m: MatchInfo): void {
   if (readSave()) {
     openModal({
       title: '新しいゲーム',
       content: '<p>保存されている対局があります。<br>新しく始めると上書きされます。</p>',
       actions: [
         { label: 'キャンセル', kind: 'ghost' },
-        { label: '新しく始める', kind: 'primary', onClick: () => { startGame(); } },
+        { label: '新しく始める', kind: 'primary', onClick: () => { startGame(m); } },
       ],
     });
   } else {
-    startGame();
+    startGame(m);
   }
 }
 
-function startGame(): void {
-  const first: Player = settings.firstPlayer === 'random' ? (Math.random() < 0.5 ? 'O' : 'X') : settings.firstPlayer;
+/** CPU game setup: strength (level 6 only once unlocked) and who moves first. */
+function openCpuSetup(): void {
+  const prog = loadProgress();
+  const levels: CpuLevel[] = prog.unlocked ? [...NORMAL_LEVELS, HIDDEN_LEVEL] : [...NORMAL_LEVELS];
+  let level: CpuLevel = levels.includes(settings.cpuLevel) ? settings.cpuLevel : 1;
+  let order: CpuOrder = settings.cpuOrder;
+  let clockSel: ClockPreset = settings.cpuClock;
+  const rec = (r: LevelRecord): string => (r.w + r.l + r.d === 0 ? '未対戦'
+    : `${r.w}勝 ${r.l}敗${r.d ? ` ${r.d}分` : ''}`);
+  const card = (l: CpuLevel): string => {
+    const r = prog.records[l];
+    const bars = Array.from({ length: 6 }, (_, i) => `<i class="${i < l ? 'on' : ''}"></i>`).join('');
+    return `<button type="button" role="radio" class="lv-card${l === HIDDEN_LEVEL ? ' secret' : ''}" data-lv="${l}" aria-checked="${l === level}">
+      <span class="lv-head"><span class="lv-num">Lv.${l}</span><span class="lv-name">${CPU_LEVELS[l].name}</span></span>
+      <span class="lv-meter" aria-hidden="true">${bars}</span>
+      <span class="lv-desc">${CPU_LEVELS[l].desc}</span>
+      <span class="lv-rec">${r.w > 0 ? '<span class="lv-clear">CLEAR</span>' : ''}${rec(r)}</span>
+    </button>`;
+  };
+  const body = document.createElement('div');
+  body.className = 'cpu-setup';
+  body.innerHTML = `
+    <section>
+      <h3>強さ</h3>
+      <div class="lv-grid" role="radiogroup" aria-label="CPUの強さ">${levels.map(card).join('')}</div>
+    </section>
+    <section>
+      <h3>手番</h3>
+      <div class="seg full" role="radiogroup" aria-label="先手" data-seg="order">
+        ${([['human', 'あなたが先手'], ['cpu', 'CPUが先手'], ['random', 'ランダム']] as [CpuOrder, string][])
+          .map(([v, l]) => `<button type="button" role="radio" data-v="${v}" aria-checked="${v === order}">${l}</button>`).join('')}
+      </div>
+      <p class="setup-note">あなたは <b class="o-txt">〇（青）</b>、CPU は <b class="x-txt">×（赤）</b>。先手のほうが有利です。</p>
+    </section>
+    <section>
+      <h3>持ち時間</h3>
+      <div class="seg full" role="radiogroup" aria-label="持ち時間" data-seg="clock">
+        ${(['3m30s', '3m10s', 'off'] as ClockPreset[])
+          .map(v => `<button type="button" role="radio" data-v="${v}" aria-checked="${v === clockSel}">${v === 'off' ? 'なし（練習）' : presetLabel(v)}</button>`).join('')}
+      </div>
+      <p class="setup-note" data-clock-note></p>
+    </section>`;
+  const clockNote = body.querySelector<HTMLElement>('[data-clock-note]');
+  const syncClockNote = (): void => {
+    if (!clockNote) return;
+    clockNote.textContent = clockSel === 'off'
+      ? '時間無制限。「待った」で自分の手番まで戻せます。'
+      : `お互いに持ち時間${CLOCK_PRESETS[clockSel].mainMs / 60000}分。使い切ると1手${CLOCK_PRESETS[clockSel].byoyomiMs / 1000}秒の秒読みになり、超えると負け。対人戦と同じく「待った」はできません。`;
+  };
+  syncClockNote();
+  body.querySelectorAll<HTMLButtonElement>('.lv-card').forEach(b => {
+    b.addEventListener('pointerenter', () => sound.hover());
+    b.addEventListener('click', () => {
+      level = Number(b.dataset['lv']) as CpuLevel;
+      body.querySelectorAll('.lv-card').forEach(x => x.setAttribute('aria-checked', String(x === b)));
+      sound.select();
+    });
+  });
+  body.querySelectorAll<HTMLElement>('.seg').forEach(g => {
+    g.querySelectorAll<HTMLButtonElement>('button').forEach(b => {
+      b.addEventListener('click', () => {
+        if (g.dataset['seg'] === 'clock') { clockSel = b.dataset['v'] as ClockPreset; syncClockNote(); }
+        else order = b.dataset['v'] as CpuOrder;
+        g.querySelectorAll('button').forEach(x => x.setAttribute('aria-checked', String(x === b)));
+        sound.click();
+      });
+    });
+  });
+  openModal({
+    title: 'CPU対戦',
+    content: body,
+    className: 'setup-modal',
+    actions: [
+      { label: 'キャンセル', kind: 'ghost' },
+      {
+        label: '対戦開始', kind: 'primary', onClick: () => {
+          setSetting('cpuLevel', level);
+          setSetting('cpuOrder', order);
+          setSetting('cpuClock', clockSel);
+          const clock = clockSel === 'off' ? null : newClock(CLOCK_PRESETS[clockSel]);
+          // let this dialog close before a possible "overwrite?" dialog opens
+          setTimeout(() => requestNewGame({ mode: 'cpu', level, human: 'O', undos: 0, clock }), 0);
+        },
+      },
+    ],
+  });
+}
+
+function startGame(m: MatchInfo = match): void {
+  tcPause(); // (charges nothing: the old game's clock is already stopped)
+  // a rematch keeps the time control but starts from full clocks
+  match = m.mode === 'cpu' ? { ...m, undos: 0, clock: m.clock ? newClock(m.clock) : null } : { mode: 'local', undos: 0 };
+  let first: Player;
+  if (match.mode === 'cpu') {
+    const o = settings.cpuOrder;
+    const humanFirst = o === 'human' || (o === 'random' && Math.random() < 0.5);
+    first = humanFirst ? match.human : other(match.human);
+  } else {
+    first = settings.firstPlayer === 'random' ? (Math.random() < 0.5 ? 'O' : 'X') : settings.firstPlayer;
+  }
   gs = { ...initialGameState(), current: first, settings: { turnLimit: settings.turnLimit } };
   phase = 'step1';
   selectedFrom = null;
@@ -234,16 +472,20 @@ function startGame(): void {
   history = [];
   elapsed = 0;
   clockRunning = false;
+  recorded = null;
+  justUnlocked = false;
   clearSave();
   if (!renderGame()) return;
   clockOn();
+  tcStart();
   sound.start();
   setTimeout(() => announceTurn(), 300);
 }
 
 function resumeGame(): void {
+  tcPause();
   const s = readSave();
-  if (!s) { startGame(); return; }
+  if (!s) { startGame({ mode: 'local', undos: 0 }); return; }
   gs = s.gameState;
   phase = s.phase;
   selectedFrom = s.selectedFrom;
@@ -251,9 +493,13 @@ function resumeGame(): void {
   log = s.log;
   history = s.history;
   elapsed = s.elapsed;
+  match = s.match;
+  recorded = null;
+  justUnlocked = false;
   clockRunning = false;
   if (!renderGame()) return;
   clockOn();
+  tcStart();
   setTimeout(() => announceTurn(), 250);
 }
 
@@ -264,6 +510,13 @@ function renderGame(): boolean {
   hoverMove = null;
   selectedMove = null;
   peekLast = false;
+  cpuActing = false;
+  cpuToken++;
+  cpu = match.mode === 'cpu' ? new CpuClient() : null;
+  tcRunning = false;
+  tcHold = false;
+  tcAnnounced = -1;
+  tcByoShown = false;
 
   root.innerHTML = `
     <div class="game" data-turn="${gs.current}">
@@ -363,12 +616,19 @@ function renderGame(): boolean {
 
   applySettings();
   refresh();
+  if (gameClock()) tcTicker = window.setInterval(tcTick, 100);
   return true;
 }
 
 function teardownGame(): void {
+  cancelCpu();
+  cpu?.dispose();
+  cpu = null;
+  window.clearInterval(tcTicker);
+  tcTicker = 0;
   if (!ui) return;
   clockOff();
+  tcPause();
   persist();
   resultModal?.close();
   resultModal = null;
@@ -393,6 +653,23 @@ function syncTopButtons(): void {
 // ── Derived state ──────────────────────────────────────────────────────────
 function canPlaceNow(): boolean { return legalPlacements(gs).length > 0; }
 
+function isCpuTurn(): boolean {
+  return match.mode === 'cpu' && gs.status === 'playing' && gs.current !== match.human;
+}
+/** "〇（青）" / "×（赤）" for two people; "あなた" / "CPU" against the CPU. */
+function nameOf(p: Player): string {
+  if (match.mode === 'cpu') return p === match.human ? 'あなた' : 'CPU';
+  return PLAYER_COLORS[p].label;
+}
+/** Human input is blocked during animations and while the CPU plays its turn. */
+function locked(): boolean { return busy || cpuActing; }
+function canUndoNow(): boolean {
+  if (match.mode !== 'cpu') return history.length > 0;
+  if (match.clock) return false; // played like a real match: no 待った on the clock
+  const human = match.human;
+  return history.some(h => h.gameState.current === human);
+}
+
 /** Label of step ① for the current turn ("配置" or "移動"). */
 function step1Label(): string {
   if (phase === 'step2') {
@@ -403,7 +680,7 @@ function step1Label(): string {
 }
 
 function targetsNow(): number[] {
-  if (gs.status !== 'playing' || busy) return [];
+  if (gs.status !== 'playing' || locked()) return [];
   if (phase === 'step1') {
     return canPlaceNow()
       ? legalPlacements(gs)
@@ -416,7 +693,7 @@ function targetsNow(): number[] {
 }
 
 function isPickable(i: number): boolean {
-  if (busy || gs.status !== 'playing') return false;
+  if (locked() || gs.status !== 'playing') return false;
   if (phase === 'step1') return canPlaceNow() ? gs.board[i] === null : gs.board[i] === gs.current;
   if (phase === 'step1-move-from') return gs.board[i] === null || gs.board[i] === gs.current;
   return false;
@@ -427,24 +704,40 @@ function winEntries(state: GameState): { line: Line; player: Player }[] {
     const p: Player = state.status === 'win:O' ? 'O' : 'X';
     return completedLines(state.board, p).map(line => ({ line, player: p }));
   }
-  if (state.status === 'draw' && state.winReason === 'simultaneous') {
-    return completedLines(state.board).map(line => ({ line, player: state.board[line[0]] as Player }));
-  }
   return [];
+}
+
+/** 王手: the opponent's lines that the player to move has to break this turn. */
+function checkEntries(): { line: Line; player: Player }[] {
+  if (gs.status !== 'playing') return [];
+  const by = other(gs.current);
+  return checkLines(gs).map(line => ({ line, player: by }));
 }
 
 function resultText(state: GameState): { title: string; reason: string; color: string } {
   if (state.status === 'win:O' || state.status === 'win:X') {
     const w: Player = state.status === 'win:O' ? 'O' : 'X';
-    const reason = state.winReason === 'selfDestruct'
-      ? `${PLAYER_COLORS[other(w)].label} のキューブ操作で相手の列が揃いました（自爆）`
-      : `${PLAYER_COLORS[w].label} が一直線に3つ揃えました`;
-    return { title: `${PLAYER_COLORS[w].label} の勝利！`, reason, color: PLAYER_COLORS[w].css };
+    const loser = other(w);
+    const color = PLAYER_COLORS[w].css;
+    const W = nameOf(w), L = nameOf(loser);
+    let title: string;
+    if (match.mode === 'cpu') {
+      const youWon = w === match.human;
+      title = youWon ? 'あなたの勝ち！' : state.winReason === 'timeout' ? '時間切れ負け' : 'CPU の勝ち';
+    } else {
+      title = `${PLAYER_COLORS[w].label} の勝利！`;
+    }
+    let reason: string;
+    switch (state.winReason) {
+      case 'timeout': reason = `${L}の持ち時間が切れました`; break;
+      case 'mate': reason = `詰み：${L}は${W}の列を崩せません`; break;
+      case 'notBroken': reason = `${L}は${W}の王手を崩せませんでした`; break;
+      case 'selfDestruct': reason = `${L}のキューブ操作で${W}の列が揃いました（自爆）`; break;
+      default: reason = `${W}の勝ちです`;
+    }
+    return { title, reason, color };
   }
-  const reason = state.winReason === 'simultaneous'
-    ? '両者の列が同時に成立しました'
-    : `手数上限（${state.settings.turnLimit ?? '-'}手）に達しました`;
-  return { title: '引き分け', reason, color: '#ffcc4d' };
+  return { title: '引き分け', reason: `手数上限（${state.settings.turnLimit ?? '-'}手）に達しました`, color: '#ffcc4d' };
 }
 
 // ── Refresh (phase changes) ────────────────────────────────────────────────
@@ -456,6 +749,7 @@ function refresh(): void {
   peekLast = false;
   el.dataset['turn'] = gs.current;
   el.classList.toggle('over', gs.status !== 'playing');
+  el.classList.toggle('cpu-turn', cpuActing);
   scene.setTurn(gs.current);
   scene.setBoard(gs.board);
   scene.setLastMoved(lastMoved);
@@ -463,16 +757,27 @@ function refresh(): void {
   scene.setTargets(targetsNow(), gs.current);
   scene.setLabelsVisible(phase === 'step2' && gs.status === 'playing');
   scene.setHover(null, null);
+  ui.schematic.setHover(null);
   if (gs.status === 'playing') scene.clearWin();
+  scene.setCheck(checkEntries());
+  const checked = gs.status === 'playing' && inCheck(gs);
   controls.render({
-    state: gs, phase, selectedFrom, canPlace: canPlaceNow(), step1Label: step1Label(), canUndo: history.length > 0, log,
+    state: gs, phase, selectedFrom, canPlace: canPlaceNow(), step1Label: step1Label(), canUndo: canUndoNow(), log,
     resultText: gs.status !== 'playing' ? resultText(gs).title : undefined,
+    names: { O: nameOf('O'), X: nameOf('X') },
+    cpu: match.mode === 'cpu' ? { side: other(match.human), label: levelLabel(match.level), acting: cpuActing } : null,
+    clock: clockFaces(),
+    undoNote: gameClock() ? '持ち時間ありの対局では「待った」はできません' : undefined,
+    check: checked
+      ? { by: other(gs.current), escapes: settings.showHints ? breakingMoves(gs.board, other(gs.current)).length : null }
+      : null,
   });
-  controls.setBusy(busy);
+  controls.setBusy(locked());
   updatePreview();
   updateHint();
   updatePill();
   persist();
+  maybeStartCpu();
 }
 
 function schematicState(preview: SchematicState['preview'], guide: CubeMove | null): SchematicState {
@@ -483,6 +788,7 @@ function schematicState(preview: SchematicState['preview'], guide: CubeMove | nu
     selected: phase === 'step1-move-from' ? selectedFrom : null,
     lastMoved,
     win,
+    check: checkEntries().flatMap(e => e.line),
     preview,
     guide,
   };
@@ -495,9 +801,10 @@ function updatePreview(): void {
   let move: CubeMove | null = null;
   let candidate = false;
   if (phase === 'step2' && gs.status === 'playing' && !busy) {
-    move = hoverMove ?? selectedMove;
+    // during the CPU's turn only its own choice is shown
+    move = cpuActing ? selectedMove : (hoverMove ?? selectedMove);
     candidate = move !== null;
-  } else if (peekLast && gs.lastCubeMove && gs.status === 'playing' && !busy) {
+  } else if (peekLast && gs.lastCubeMove && gs.status === 'playing' && !locked()) {
     move = gs.lastCubeMove;
   }
 
@@ -508,7 +815,8 @@ function updatePreview(): void {
     const res = resolveAfterCubeMove(gs, move);
     after = res.board;
     if (settings.showHints) {
-      outcome = outcomeOf(res, gs.current);
+      // the outcome text speaks to the mover, so it is only shown for your own moves
+      if (!cpuActing) outcome = outcomeOf(res, gs.current, inCheck(gs));
       lines = completedLines(res.board).map(line => ({ line, player: res.board[line[0]] as Player }));
     }
   }
@@ -518,20 +826,23 @@ function updatePreview(): void {
   controls.setPreviewInfo(candidate ? move : null, outcome);
 }
 
-function outcomeOf(res: GameState, mover: Player): Outcome | null {
-  if (res.status === 'playing') return null;
-  if (res.status === 'draw') return res.winReason === 'turnLimit' ? 'limit' : 'draw';
-  return res.status === `win:${mover}` ? 'win' : 'self';
+function outcomeOf(res: GameState, mover: Player, checked: boolean): Outcome | null {
+  if (res.status === `win:${mover}`) return 'mate';
+  if (res.status === 'win:O' || res.status === 'win:X') return res.winReason === 'notBroken' ? 'notBroken' : 'self';
+  if (res.status === 'draw') return 'limit';
+  if (completedLines(res.board, mover).length > 0) return 'check';
+  return checked ? 'escape' : null;
 }
 
 function updateHint(): void {
   if (!ui) return;
-  const P = PLAYER_COLORS[gs.current];
+  const who = nameOf(gs.current);
   let text: string;
   if (gs.status !== 'playing') text = resultText(gs).title;
-  else if (phase === 'step1') text = canPlaceNow() ? `${P.label}：光っている空きマスに駒を置く` : `${P.label}：動かす自分の駒を選ぶ`;
+  else if (cpuActing) text = phase === 'step2' ? 'CPU がキューブ操作を選んでいます' : 'CPU が考えています…';
+  else if (phase === 'step1') text = (inCheck(gs) ? '王手！ ' : '') + (canPlaceNow() ? `${who}：光っている空きマスに駒を置く` : `${who}：動かす自分の駒を選ぶ`);
   else if (phase === 'step1-move-from') text = '移動先の空きマスを選ぶ（Esc で選び直し）';
-  else text = `${P.label}：キューブ操作を選んで「確定」`;
+  else text = inCheck(gs) ? `王手！ ${who}：相手の列を崩す操作を選んで「確定」` : `${who}：キューブ操作を選んで「確定」`;
   ui.hint.innerHTML = `<span class="dot"></span><span>${text}</span>`;
   ui.hint.classList.remove('pop');
   void ui.hint.offsetWidth;
@@ -547,20 +858,27 @@ function updatePill(): void {
     return;
   }
   const s1 = phase !== 'step2';
-  ui.pill.innerHTML = `<span class="chip">${P.glyph}</span><span class="who">${P.label} の番</span>
-    <span class="steps"><span class="${s1 ? 'on' : 'done'}">①${step1Label()}</span><span class="${s1 ? '' : 'on'}">②操作</span></span>`;
+  const dots = cpuActing && s1 ? '<span class="think-dots"><i></i><i></i><i></i></span>' : '';
+  ui.pill.innerHTML = `<span class="chip">${P.glyph}</span><span class="who">${nameOf(gs.current)}の番${dots}</span>${inCheck(gs) ? '<span class="pill-check">王手</span>' : ''}
+    <span class="steps"><span class="${s1 ? 'on' : 'done'}">①${step1Label()}</span><span class="${s1 ? '' : 'on'}">②操作</span></span>
+    ${gameClock() ? `<span class="pill-clock" data-pclock title="持ち時間">${icon('timer')}<b></b></span>` : ''}`;
+  renderClocks();
 }
 
 function announceTurn(): void {
   if (!ui || gs.status !== 'playing') return;
   const P = PLAYER_COLORS[gs.current];
-  const sub = canPlaceNow() ? `手駒 残り${gs.hand[gs.current]}` : '移動フェーズ';
-  ui.banner.innerHTML = `<div class="banner-inner ${gs.current.toLowerCase()}"><span class="b-chip">${P.glyph}</span><span class="b-main">${P.label} の番</span><span class="b-sub">${sub}</span></div>`;
+  const checked = inCheck(gs);
+  const sub = checked ? '王手！ 相手の列を崩す' : canPlaceNow() ? `手駒 残り${gs.hand[gs.current]}` : '移動フェーズ';
+  ui.banner.innerHTML = `<div class="banner-inner ${gs.current.toLowerCase()}${checked ? ' check' : ''}"><span class="b-chip">${P.glyph}</span><span class="b-main">${nameOf(gs.current)}の番</span><span class="b-sub">${sub}</span></div>`;
   ui.banner.classList.remove('show');
   void ui.banner.offsetWidth;
   ui.banner.classList.add('show');
-  ui.live.textContent = `${P.label} の番です。`;
-  sound.turn(gs.current);
+  ui.live.textContent = checked
+    ? `王手。${nameOf(gs.current)}の番です。${nameOf(other(gs.current))}の列を崩してください。`
+    : `${nameOf(gs.current)}の番です。`;
+  if (checked) sound.check();
+  else sound.turn(gs.current);
 }
 
 function toast(msg: string, kind: 'info' | 'warn' = 'info'): void {
@@ -580,6 +898,7 @@ function toast(msg: string, kind: 'info' | 'warn' = 'info'): void {
 // ── Board interaction ──────────────────────────────────────────────────────
 function onCellHover(i: number | null): void {
   if (!ui) return;
+  if (cpuActing) return; // the CPU's own hover marker is showing
   let ghost: Player | null = null;
   if (i !== null && !busy && gs.status === 'playing' && gs.board[i] === null
     && ((phase === 'step1' && canPlaceNow()) || (phase === 'step1-move-from' && selectedFrom !== null))) {
@@ -591,7 +910,15 @@ function onCellHover(i: number | null): void {
 
 function onCellClick(i: number | null, raw: number | null): void {
   sound.unlock();
-  if (!ui || busy || gs.status !== 'playing') return;
+  if (!ui || gs.status !== 'playing') return;
+  if (cpuActing) {
+    if (raw !== null && performance.now() - lastBusyToast > 2500) {
+      lastBusyToast = performance.now();
+      toast('CPU の番です。少しお待ちください');
+    }
+    return;
+  }
+  if (busy) return;
   if (phase === 'step2') {
     if (raw !== null) {
       sound.invalid();
@@ -650,7 +977,7 @@ function setBusy(b: boolean): void {
   busy = b;
   if (!ui) return;
   ui.el.classList.toggle('busy', b);
-  ui.controls.setBusy(b);
+  ui.controls.setBusy(locked());
   if (b) {
     ui.scene.setTargets([], gs.current);
     ui.scene.setHover(null, null);
@@ -671,12 +998,7 @@ async function doPlace(i: number): Promise<void> {
   if (ui !== u) return;
   gs = next;
   lastMoved = i;
-  if (checkStep1Win(next)) {
-    gs = { ...next, status: `win:${mark}`, winReason: 'line' };
-    finishLog();
-    await finishGame();
-    return;
-  }
+  noteOwnLine(mark);
   phase = 'step2';
   selectedMove = null;
   setBusy(false);
@@ -699,28 +1021,33 @@ async function doMove(from: number, to: number): Promise<void> {
   gs = next;
   lastMoved = to;
   selectedFrom = null;
-  if (checkStep1Win(next)) {
-    gs = { ...next, status: `win:${mark}`, winReason: 'line' };
-    finishLog();
-    await finishGame();
-    return;
-  }
+  noteOwnLine(mark);
   phase = 'step2';
   selectedMove = null;
   setBusy(false);
   refresh();
 }
 
+/** Step ① completed your own line: it only counts if it survives your cube move (then it is 王手). */
+function noteOwnLine(mark: Player): void {
+  if (gs.status !== 'playing' || cpuActing || completedLines(gs.board, mark).length === 0) return;
+  toast(isMate(gs.board, mark)
+    ? 'どの操作でも崩れない列が揃いました。②を終えると詰みです'
+    : '列が揃いました。②の操作のあとも残っていれば王手です');
+}
+
 async function doCubeMove(move: CubeMove): Promise<void> {
   const u = ui;
   if (!u || busy || phase !== 'step2' || gs.status !== 'playing') return;
   if (!legalCubeMoves(gs).some(m => movesEqual(m, move))) { sound.invalid(); return; }
+  tcEndTurn(gs.current); // the turn is over once the cube move is confirmed
   pushHistory();
   sound.confirm();
   selectedMove = null;
   hoverMove = null;
   setBusy(true);
   u.scene.setLabelsVisible(false);
+  u.scene.setCheck([]); // the pieces are about to move
   updatePreview();
   const next = resolveAfterCubeMove(gs, move);
   const perm = movePermutation(move);
@@ -749,6 +1076,7 @@ async function doCubeMove(move: CubeMove): Promise<void> {
   setBusy(false);
   refresh();
   announceTurn();
+  tcStart();
 }
 
 function finishLog(): void {
@@ -759,14 +1087,24 @@ function finishLog(): void {
 async function finishGame(): Promise<void> {
   const u = ui;
   if (!u) return;
+  cpuActing = false;
   clockOff();
+  tcPause();
   clearSave();
   setBusy(true);
   refresh();
   u.scene.showWin(winEntries(gs));
+  // against the CPU the jingle is from your side: a CPU win sounds like a loss
+  const happy = match.mode !== 'cpu' || gs.status === `win:${match.human}`;
+  if (match.mode === 'cpu') {
+    const result: GameResult = gs.status === 'draw' ? 'd' : happy ? 'w' : 'l';
+    justUnlocked = recordResult(match.level, result, { undos: match.undos });
+    recorded = { level: match.level, result };
+  }
   if (gs.status === 'draw') sound.draw();
-  else if (gs.winReason === 'selfDestruct') sound.selfDestruct();
-  else sound.win();
+  else if (gs.winReason === 'selfDestruct') sound.selfDestruct(happy);
+  else if (happy) sound.win();
+  else sound.lose();
   u.live.textContent = `${resultText(gs).title} ${resultText(gs).reason}`;
   await wait(gs.winReason === 'selfDestruct' ? 1500 : 1100);
   if (ui !== u) return;
@@ -777,8 +1115,46 @@ async function finishGame(): Promise<void> {
 
 function undo(): void {
   if (!ui) return;
+  if (match.mode === 'cpu') { undoVsCpu(); return; }
   if (busy || history.length === 0) { sound.invalid(); return; }
-  const snap = history.pop() as Snapshot;
+  restore(history.pop() as Snapshot);
+  sound.undo();
+  toast('一手戻しました');
+  refresh();
+}
+
+/** 待った: go back to your own last decision, skipping the CPU's (cancels its turn). */
+function undoVsCpu(): void {
+  if (!ui || match.mode !== 'cpu') return;
+  if (match.clock) {
+    sound.invalid();
+    toast('持ち時間ありの対局では「待った」はできません');
+    return;
+  }
+  const human = match.human;
+  let k = history.length - 1;
+  while (k >= 0 && history[k].gameState.current !== human) k--;
+  if (busy || k < 0) {
+    sound.invalid();
+    if (!busy) toast('これ以上は戻せません');
+    return;
+  }
+  cancelCpu();
+  const snap = history[k];
+  history = history.slice(0, k);
+  if (gs.status !== 'playing' && recorded) {
+    recordResult(recorded.level, recorded.result, { undos: 0, undo: true });
+    recorded = null;
+  }
+  restore(snap);
+  match = { ...match, undos: match.undos + 1 };
+  sound.undo();
+  toast('待った！ あなたの手番まで戻しました');
+  refresh();
+}
+
+function restore(snap: Snapshot): void {
+  if (!ui) return;
   const wasOver = gs.status !== 'playing';
   gs = snap.gameState;
   phase = snap.phase;
@@ -791,14 +1167,112 @@ function undo(): void {
   resultModal = null;
   ui.scene.clearWin();
   if (wasOver) clockOn();
-  sound.undo();
-  toast('一手戻しました');
+}
+
+// ── CPU turn ───────────────────────────────────────────────────────────────
+function cancelCpu(): void {
+  cpuToken++;
+  cpu?.cancel();
+  cpuActing = false;
+}
+
+function maybeStartCpu(): void {
+  if (!ui || !cpu || cpuActing || busy || !isCpuTurn()) return;
+  const token = cpuToken;
+  setTimeout(() => { if (token === cpuToken) void runCpuTurn(); }, 30);
+}
+
+/**
+ * On a clock the CPU must not lose on time: it keeps its search well inside the
+ * time left (its turn also spends ~2 s showing the move). Undefined = the level's own budget.
+ */
+function cpuThinkBudget(level: CpuLevel): number | undefined {
+  const c = gameClock();
+  if (!c) return undefined;
+  const own = LEVEL_PARAMS[level].timeMs;
+  if (own <= 0) return undefined;
+  const left = c.left[gs.current] - tcUsed(c);
+  const cap = left > 0 ? Math.max(400, left / 12) : c.byoyomiMs - 4000;
+  return Math.max(300, Math.min(own, cap));
+}
+
+async function untilNoModal(alive: () => boolean): Promise<void> {
+  if (!isModalOpen()) return;
+  // pause while the rules / settings are open so you don't miss the CPU's move
+  // (that wait is yours, so the CPU's clock is held meanwhile)
+  tcHold = true;
+  tcPause();
+  while (alive() && isModalOpen()) await new Promise<void>(r => setTimeout(r, 200));
+  tcHold = false;
+  if (alive()) tcStart();
+}
+
+/**
+ * The CPU's turn, shown at a readable pace: think → point at its cell (or
+ * lift its piece) → place / move → show the chosen cube move → play it.
+ */
+async function runCpuTurn(): Promise<void> {
+  const u = ui, client = cpu;
+  if (!u || !client || cpuActing || busy || !isCpuTurn() || match.mode !== 'cpu') return;
+  const level = match.level;
+  const token = ++cpuToken;
+  const alive = (): boolean => token === cpuToken && ui === u;
+  cpuActing = true;
+  selectedMove = null;
+  hoverMove = null;
   refresh();
+
+  const step1Done = phase === 'step2';
+  const [decision] = await Promise.all([
+    client.think(gs, level, step1Done, cpuThinkBudget(level)),
+    wait((step1Done ? 450 : 800) + Math.random() * 400),
+  ]);
+  if (!alive()) return;
+  if (!decision) { cpuActing = false; refresh(); return; }
+  await untilNoModal(alive);
+  if (!alive()) return;
+
+  const me = gs.current;
+  if (!step1Done && decision.step1) {
+    const a = decision.step1;
+    if (a.kind === 'place') {
+      u.scene.setHover(a.index, me);
+      u.schematic.setHover(a.index);
+      await wait(380);
+      if (!alive()) return;
+      u.scene.setHover(null, null);
+      u.schematic.setHover(null);
+      u.live.textContent = `CPU：${describeStep1(a)}`;
+      await doPlace(a.index);
+    } else {
+      u.scene.setSelected(a.from);
+      sound.select();
+      await wait(520);
+      if (!alive()) return;
+      u.live.textContent = `CPU：${describeStep1(a)}`;
+      await doMove(a.from, a.to);
+    }
+    if (!alive() || gs.status !== 'playing') return; // e.g. the clock ran out meanwhile
+  }
+
+  const cube = decision.cube;
+  selectedMove = cube;
+  sound.preview();
+  updatePreview();
+  u.live.textContent = `CPU：${describeMove(cube)}`;
+  await wait(1050);
+  if (!alive()) return;
+  await untilNoModal(alive);
+  if (!alive()) return;
+  cpuActing = false;
+  await doCubeMove(cube);
 }
 
 // ── Controls panel events ──────────────────────────────────────────────────
 function onControlEvent(e: ControlEvent): void {
   sound.unlock();
+  // while the CPU plays, only 待った / result / navigation stay available
+  if (cpuActing && e.type !== 'undo' && e.type !== 'showResult' && e.type !== 'replay' && e.type !== 'title') return;
   switch (e.type) {
     case 'hoverMove':
       if (e.move && (!hoverMove || !movesEqual(e.move, hoverMove))) sound.hover();
@@ -876,6 +1350,7 @@ function onKey(e: KeyboardEvent): void {
   const scene = ui.scene;
   switch (k) {
     case 'Escape':
+      if (cpuActing) break;
       if (phase === 'step2') cancelMove();
       else deselectPiece();
       break;
@@ -883,7 +1358,7 @@ function onKey(e: KeyboardEvent): void {
       // Plain buttons keep their native Enter; on the move grid Enter means "confirm".
       const onButton = t?.tagName === 'BUTTON' && !t.classList.contains('op-btn');
       if (onButton) return;
-      if (phase === 'step2' && selectedMove && !busy) {
+      if (phase === 'step2' && selectedMove && !locked()) {
         e.preventDefault();
         void doCubeMove(selectedMove);
       }
@@ -921,6 +1396,16 @@ function showResult(): void {
   const winner: Player | null = gs.status === 'win:O' ? 'O' : gs.status === 'win:X' ? 'X' : null;
   const placed = log.filter(e => e.step1.kind === 'place').length;
   const moved = log.length - placed;
+  const vsCpu = match.mode === 'cpu' ? match : null;
+  let extra = '';
+  if (vsCpu) {
+    const rec = loadProgress().records[vsCpu.level];
+    extra += `<div class="result-rec">${levelLabel(vsCpu.level)} との戦績<span><b>${rec.w}</b>勝 <b>${rec.l}</b>敗 <b>${rec.d}</b>分</span></div>`;
+    if (justUnlocked) {
+      extra += `<div class="unlock" role="status">${icon('zap')}<div><b>隠しレベル解放！</b>
+        <span>「${levelLabel(HIDDEN_LEVEL)}」に挑戦できるようになりました。CPU対戦の強さ選択から選べます。</span></div></div>`;
+    }
+  }
   const body = `
     <div class="result" style="--rc:${r.color}">
       <div class="result-icon">${winner ? `<span class="rchip ${winner.toLowerCase()}">${PLAYER_COLORS[winner].glyph}</span>` : '<span class="rchip draw">＝</span>'}</div>
@@ -928,20 +1413,32 @@ function showResult(): void {
       <div class="result-reason">${r.reason}</div>
       <dl class="stats">
         <div><dt>手数</dt><dd>${gs.ply}</dd></div>
-        <div><dt>配置／移動</dt><dd>${placed}／${moved}</dd></div>
+        ${vsCpu?.clock
+          ? `<div><dt>残り持ち時間</dt><dd>${vsCpu.clock.left[vsCpu.human] > 0 || gs.winReason === 'timeout'
+            ? fmtClock(vsCpu.clock.left[vsCpu.human]) : '秒読み'}</dd></div>`
+          : vsCpu
+            ? `<div><dt>待った</dt><dd>${vsCpu.undos}</dd></div>`
+            : `<div><dt>配置／移動</dt><dd>${placed}／${moved}</dd></div>`}
         <div><dt>経過時間</dt><dd>${fmtTime(currentElapsed())}</dd></div>
       </dl>
+      ${extra}
     </div>`;
+  const actions: ModalAction[] = [
+    { label: 'タイトルへ', kind: 'ghost', onClick: () => { renderTitle(); } },
+    { label: '盤面を見る', kind: 'ghost' },
+  ];
+  if (vsCpu) actions.push({ label: '強さを変える', kind: 'ghost', onClick: () => { setTimeout(() => openCpuSetup(), 0); } });
+  actions.push({ label: 'もう一度', kind: 'primary', autofocus: true, onClick: () => { startGame(); } });
   resultModal = openModal({
     content: body,
     className: 'result-modal',
-    actions: [
-      { label: 'タイトルへ', kind: 'ghost', onClick: () => { renderTitle(); } },
-      { label: '盤面を見る', kind: 'ghost' },
-      { label: 'もう一度', kind: 'primary', autofocus: true, onClick: () => { startGame(); } },
-    ],
+    actions,
     onClose: () => { resultModal = null; },
   });
+  if (justUnlocked) {
+    sound.secret(0.5);
+    justUnlocked = false;
+  }
 }
 
 function confirmQuit(): void {
@@ -977,7 +1474,7 @@ function showSettings(): void {
     </section>
     <section>
       <h3>対局ルール <small>（次の新しいゲームから適用）</small></h3>
-      <div class="row"><span>先手</span>${seg<FirstPlayer>('firstPlayer', [['O', '〇 青'], ['X', '× 赤'], ['random', 'ランダム']], settings.firstPlayer)}</div>
+      <div class="row"><span>先手<small>ふたりで対戦のとき（CPU対戦は対戦前に選択）</small></span>${seg<FirstPlayer>('firstPlayer', [['O', '〇 青'], ['X', '× 赤'], ['random', 'ランダム']], settings.firstPlayer)}</div>
       <label class="row"><span>手数上限<small>到達すると引き分け</small></span>
         <select data-k="turnLimit">${TURN_LIMITS.map(v => `<option value="${v ?? ''}" ${v === settings.turnLimit ? 'selected' : ''}>${v ? `${v}手` : 'なし'}</option>`).join('')}</select>
       </label>
@@ -1020,12 +1517,13 @@ export function initApp(el: HTMLElement): void {
   window.addEventListener('pointerdown', unlock, { capture: true });
   window.addEventListener('keydown', unlock, { capture: true });
   document.addEventListener('keydown', onKey);
+  // leaving the page suspends the game: the play time and 持ち時間 stop until you come back
   document.addEventListener('visibilitychange', () => {
     if (!ui) return;
-    if (document.hidden) { clockOff(); persist(); }
-    else clockOn();
+    if (document.hidden) { clockOff(); tcPause(); persist(); }
+    else { clockOn(); tcStart(); }
   });
-  window.addEventListener('pagehide', () => { if (ui) { clockOff(); persist(); } });
+  window.addEventListener('pagehide', () => { if (ui) { clockOff(); tcPause(); persist(); } });
   renderTitle();
 }
 

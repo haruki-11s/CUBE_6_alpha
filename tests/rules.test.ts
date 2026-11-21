@@ -3,8 +3,9 @@ import {
   legalPlacements, legalMoves, legalCubeMoves,
   applyStep1Place, applyFullTurn,
   resolveAfterCubeMove,
-  isReverseCubeMove,
+  inCheck, checkLines, breakingMoves, isMate,
 } from '../src/core/rules';
+import { applyCubeMove } from '../src/core/cube';
 import { checkBothWin } from '../src/core/lines';
 import { initialGameState, toIndex } from '../src/core/board';
 import type { GameState, CubeMove, Mark } from '../src/core/types';
@@ -14,6 +15,8 @@ function boardWith(cells: Array<[number, number, number, 'O' | 'X']>): Mark[] {
   for (const [x, y, z, m] of cells) b[toIndex(x, y, z)] = m;
   return b;
 }
+
+const rot = (axis: 'X' | 'Y' | 'Z', layer: 0 | 1 | 2, dir: 'CW' | 'CCW'): CubeMove => ({ kind: 'rotate', axis, layer, dir });
 
 // ---- Placement / movement legality ----
 
@@ -49,88 +52,61 @@ describe('step1 legality', () => {
   });
 });
 
-// ---- Reverse move prohibition ----
+// ---- Cube moves: no banned move ----
 
 describe('legalCubeMoves', () => {
-  it('all 24 moves legal on first turn (no lastCubeMove)', () => {
+  it('all 24 moves are legal, even right after the opponent played the inverse', () => {
     expect(legalCubeMoves(initialGameState())).toHaveLength(24);
-  });
-
-  it('exactly 23 moves legal when last move exists (reverse is banned)', () => {
-    const s: GameState = {
-      ...initialGameState(),
-      lastCubeMove: { kind: 'rotate', axis: 'Z', layer: 0, dir: 'CW' },
-    };
-    const legal = legalCubeMoves(s);
-    expect(legal).toHaveLength(23);
-    const forbidden: CubeMove = { kind: 'rotate', axis: 'Z', layer: 0, dir: 'CCW' };
-    expect(legal.some(m => JSON.stringify(m) === JSON.stringify(forbidden))).toBe(false);
-  });
-
-  it('slide forward is banned only when last was slide backward (same axis)', () => {
-    const s: GameState = {
-      ...initialGameState(),
-      lastCubeMove: { kind: 'slide', axis: 'X', dir: 'backward' },
-    };
-    const legal = legalCubeMoves(s);
-    expect(legal).toHaveLength(23);
-    expect(legal.some(m => m.kind === 'slide' && m.axis === 'X' && m.dir === 'forward')).toBe(false);
-  });
-
-  it('isReverseCubeMove correctly identifies inverse', () => {
-    expect(isReverseCubeMove(
-      { kind: 'rotate', axis: 'X', layer: 1, dir: 'CW' },
-      { kind: 'rotate', axis: 'X', layer: 1, dir: 'CCW' },
-    )).toBe(true);
-    expect(isReverseCubeMove(
-      { kind: 'slide', axis: 'Y', dir: 'forward' },
-      { kind: 'slide', axis: 'Y', dir: 'backward' },
-    )).toBe(true);
-    expect(isReverseCubeMove(
-      { kind: 'rotate', axis: 'X', layer: 1, dir: 'CW' },
-      { kind: 'rotate', axis: 'X', layer: 1, dir: 'CW' },
-    )).toBe(false);
+    const s: GameState = { ...initialGameState(), lastCubeMove: rot('Z', 0, 'CW') };
+    expect(legalCubeMoves(s)).toHaveLength(24);
+    expect(legalCubeMoves(s).some(m => JSON.stringify(m) === JSON.stringify(rot('Z', 0, 'CCW')))).toBe(true);
   });
 });
 
-// ---- Step 1 immediate win ----
+// ---- 王手 rule ----
 
-describe('step1 immediate win', () => {
-  it('placing the winning piece ends game before step2', () => {
-    const s: GameState = {
-      ...initialGameState(),
-      board: boardWith([[0, 0, 0, 'O'], [1, 0, 0, 'O']]),
-      hand: { O: 4, X: 6 },
-    };
-    const cubeMove: CubeMove = { kind: 'slide', axis: 'X', dir: 'forward' };
-    const result = applyFullTurn(s, { kind: 'place', index: toIndex(2, 0, 0) }, cubeMove);
-    expect(result.status).toBe('win:O');
-    expect(result.winReason).toBe('line');
-    // step2 skipped: the board only reflects step1
-    expect(result.board[toIndex(2, 0, 0)]).toBe('O');
-  });
+// O's line along x at y = 0, z = 0 once (2,0,0) is placed
+const nearLine = (): GameState => ({
+  ...initialGameState(),
+  board: boardWith([[0, 0, 0, 'O'], [1, 0, 0, 'O'], [1, 1, 2, 'X'], [2, 2, 2, 'X']]),
+  hand: { O: 4, X: 4 },
 });
 
-// ---- Self-destruct ----
-
-describe('self-destruct (自爆)', () => {
-  it('an opponent-only line after step ② is scored as self-destruct', () => {
-    // A slide translates the whole board, so X's face diagonal survives it.
-    // (Contrived — in real play X could not already own a line — but it isolates the scoring.)
-    const s: GameState = {
-      ...initialGameState(),
-      board: boardWith([[0, 0, 0, 'X'], [0, 1, 1, 'X'], [0, 2, 2, 'X'], [2, 2, 2, 'O']]),
-      hand: { O: 5, X: 3 },
-      current: 'O',
-    };
-    const result = resolveAfterCubeMove(s, { kind: 'slide', axis: 'X', dir: 'backward' });
-    expect(result.status).toBe('win:X');
-    expect(result.winReason).toBe('selfDestruct');
+describe('王手 (check)', () => {
+  it('completing a line in step ① is not a win by itself', () => {
+    // Z-layer 2 does not touch the line: it survives the cube move → check
+    const t = applyFullTurn(nearLine(), { kind: 'place', index: toIndex(2, 0, 0) }, rot('Z', 2, 'CW'));
+    expect(t.status).toBe('playing');
+    expect(t.current).toBe('X');
+    expect(inCheck(t)).toBe(true);
+    expect(checkLines(t)).toHaveLength(1);
   });
 
-  it('layer rotation that creates an opponent line → self-destruct', () => {
-    // X: (2,0,0), (2,2,1), (2,2,2) — no line. Rotating Z-layer 0 CCW moves (2,0,0) → (2,2,0),
-    // completing X's z-line (2,2,*).
+  it('a line broken by your own cube move is nothing', () => {
+    // X-layer 0 moves (0,0,0) out of the line
+    const t = applyFullTurn(nearLine(), { kind: 'place', index: toIndex(2, 0, 0) }, rot('X', 0, 'CCW'));
+    expect(t.status).toBe('playing');
+    expect(inCheck(t)).toBe(false);
+  });
+
+  it('breaking the check keeps the game going; leaving it loses', () => {
+    const checked = applyFullTurn(nearLine(), { kind: 'place', index: toIndex(2, 0, 0) }, rot('Z', 2, 'CW'));
+    const escapes = breakingMoves(checked.board, 'O');
+    expect(escapes.length).toBeGreaterThan(0);
+    expect(escapes.length).toBeLessThan(24);
+
+    const broke = applyFullTurn(checked, { kind: 'place', index: toIndex(0, 2, 0) }, escapes[0]);
+    expect(broke.status).toBe('playing');
+    expect(checkBothWin(broke.board).O).toBe(false);
+
+    const kept = legalCubeMoves(checked).find(m => !escapes.some(e => JSON.stringify(e) === JSON.stringify(m))) as CubeMove;
+    const lost = applyFullTurn(checked, { kind: 'place', index: toIndex(0, 2, 0) }, kept);
+    expect(lost.status).toBe('win:O');
+    expect(lost.winReason).toBe('notBroken');
+  });
+
+  it('a cube move that completes the opponent\'s line loses (自爆)', () => {
+    // X: (2,0,0), (2,2,1), (2,2,2). Rotating Z-layer 0 CCW moves (2,0,0) → (2,2,0).
     const s: GameState = {
       ...initialGameState(),
       board: boardWith([[2, 0, 0, 'X'], [2, 2, 1, 'X'], [2, 2, 2, 'X'], [0, 0, 1, 'O']]),
@@ -138,27 +114,13 @@ describe('self-destruct (自爆)', () => {
       current: 'O',
     };
     expect(checkBothWin(s.board)).toEqual({ O: false, X: false });
-    const result = resolveAfterCubeMove(s, { kind: 'rotate', axis: 'Z', layer: 0, dir: 'CCW' });
+    const result = resolveAfterCubeMove(s, rot('Z', 0, 'CCW'));
     expect(result.status).toBe('win:X');
     expect(result.winReason).toBe('selfDestruct');
   });
-});
 
-// ---- Simultaneous win = draw ----
-
-describe('simultaneous completion = draw', () => {
-  it('checkBothWin correctly detects simultaneous completion', () => {
-    const b = boardWith([
-      [0, 0, 0, 'O'], [1, 0, 0, 'O'], [2, 0, 0, 'O'],
-      [0, 1, 0, 'X'], [1, 1, 0, 'X'], [2, 1, 0, 'X'],
-    ]);
-    expect(checkBothWin(b)).toEqual({ O: true, X: true });
-  });
-
-  it('a single layer rotation can complete lines for BOTH players → draw', () => {
-    // Before: no lines.  Z-layer 0 CCW maps (x,y) → (2−y, x):
-    //   O (0,2,0) → (0,0,0) completes O's z-line (0,0,*)
-    //   X (2,0,0) → (2,2,0) completes X's z-line (2,2,*)
+  it('when one cube move completes both lines, the mover loses', () => {
+    // Z-layer 0 CCW: O (0,2,0) → (0,0,0) and X (2,0,0) → (2,2,0) both complete
     const s: GameState = {
       ...initialGameState(),
       board: boardWith([
@@ -168,10 +130,41 @@ describe('simultaneous completion = draw', () => {
       hand: { O: 3, X: 3 },
       current: 'O',
     };
-    expect(checkBothWin(s.board)).toEqual({ O: false, X: false });
-    const result = resolveAfterCubeMove(s, { kind: 'rotate', axis: 'Z', layer: 0, dir: 'CCW' });
-    expect(result.status).toBe('draw');
-    expect(result.winReason).toBe('simultaneous');
+    const result = resolveAfterCubeMove(s, rot('Z', 0, 'CCW'));
+    expect(checkBothWin(result.board)).toEqual({ O: true, X: true });
+    expect(result.status).toBe('win:X');
+  });
+});
+
+describe('詰み (mate)', () => {
+  it('the three centre-axis lines survive every cube move', () => {
+    const axisLines = [
+      [[1, 1, 0], [1, 1, 1], [1, 1, 2]],
+      [[1, 0, 1], [1, 1, 1], [1, 2, 1]],
+      [[0, 1, 1], [1, 1, 1], [2, 1, 1]],
+    ] as const;
+    for (const line of axisLines) {
+      const b = boardWith(line.map(([x, y, z]) => [x, y, z, 'O'] as [number, number, number, 'O']));
+      for (const m of legalCubeMoves()) expect(checkBothWin(applyCubeMove(b, m)).O).toBe(true);
+      expect(isMate(b, 'O')).toBe(true);
+      expect(breakingMoves(b, 'O')).toHaveLength(0);
+    }
+  });
+
+  it('an unbreakable line wins at once', () => {
+    const s: GameState = {
+      ...initialGameState(),
+      board: boardWith([[1, 1, 0, 'O'], [1, 1, 1, 'O'], [0, 0, 0, 'X'], [2, 2, 2, 'X']]),
+      hand: { O: 4, X: 4 },
+    };
+    const t = applyFullTurn(s, { kind: 'place', index: toIndex(1, 1, 2) }, rot('Y', 0, 'CW'));
+    expect(t.status).toBe('win:O');
+    expect(t.winReason).toBe('mate');
+  });
+
+  it('an ordinary edge line is not mate', () => {
+    const b = boardWith([[0, 0, 0, 'O'], [1, 0, 0, 'O'], [2, 0, 0, 'O']]);
+    expect(isMate(b, 'O')).toBe(false);
   });
 });
 

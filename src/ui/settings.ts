@@ -1,5 +1,10 @@
+import type { CpuLevel } from '../core/ai';
+import type { ClockPreset } from '../core/clock';
+
 export type AnimSpeed = 'slow' | 'normal' | 'fast';
 export type FirstPlayer = 'O' | 'X' | 'random';
+/** CPU games: who moves first. */
+export type CpuOrder = 'human' | 'cpu' | 'random';
 
 export interface Settings {
   sound: boolean;
@@ -10,6 +15,9 @@ export interface Settings {
   explode: boolean;        // spread the layers apart
   turnLimit: number | null;
   firstPlayer: FirstPlayer;
+  cpuLevel: CpuLevel;      // last chosen CPU strength
+  cpuOrder: CpuOrder;
+  cpuClock: ClockPreset;   // CPU games: 持ち時間
 }
 
 export const SPEED_MULT: Readonly<Record<AnimSpeed, number>> = { slow: 1.5, normal: 1, fast: 0.55 };
@@ -31,6 +39,9 @@ export function defaultSettings(): Settings {
     explode: false,
     turnLimit: null,
     firstPlayer: 'O',
+    cpuLevel: 1,
+    cpuOrder: 'human',
+    cpuClock: '3m30s',
   };
 }
 
@@ -53,6 +64,10 @@ export function loadSettings(): Settings {
       turnLimit: v.turnLimit === null || (typeof v.turnLimit === 'number' && Number.isInteger(v.turnLimit) && v.turnLimit > 0)
         ? (v.turnLimit as number | null) : d.turnLimit,
       firstPlayer: v.firstPlayer === 'O' || v.firstPlayer === 'X' || v.firstPlayer === 'random' ? v.firstPlayer : d.firstPlayer,
+      cpuLevel: typeof v.cpuLevel === 'number' && Number.isInteger(v.cpuLevel) && v.cpuLevel >= 1 && v.cpuLevel <= 6
+        ? (v.cpuLevel as CpuLevel) : d.cpuLevel,
+      cpuOrder: v.cpuOrder === 'human' || v.cpuOrder === 'cpu' || v.cpuOrder === 'random' ? v.cpuOrder : d.cpuOrder,
+      cpuClock: v.cpuClock === 'off' || v.cpuClock === '3m10s' || v.cpuClock === '3m30s' ? v.cpuClock : d.cpuClock,
     };
   } catch {
     return d;

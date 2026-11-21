@@ -12,5 +12,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     passWithNoTests: true,
+    // the CPU tests search for real (up to ~4 s locally); CI machines can be slower than the 5 s default
+    testTimeout: 30_000,
   },
 });

@@ -1,8 +1,22 @@
-import type { Mark, CubeMove, GameState, Step1Action } from './types';
+import type { Mark, CubeMove, GameState, Player, Step1Action, WinReason } from './types';
 import { countOnBoard } from './board';
-import { applyCubeMove, invertMove, movesEqual } from './cube';
+import { applyCubeMove } from './cube';
 export { invertMove } from './cube';
-import { checkBothWin } from './lines';
+import { checkBothWin, completedLines, type Line } from './lines';
+
+/*
+ * 王手 (check) rule
+ *
+ *  - A line only counts at the end of a turn (after step ②).
+ *  - If, at the end of your turn, your opponent has a line on the board, you
+ *    lose: you did not break their check, or your cube move completed it.
+ *  - If you have a line at the end of your turn, that is 王手 (check): your
+ *    opponent must break it with their cube move. When no cube move can break
+ *    it, it is 詰み (mate) and you win at once.
+ *  - Every one of the 24 cube moves is always legal.
+ */
+
+const opponent = (p: Player): Player => (p === 'O' ? 'X' : 'O');
 
 // ---- Step 1 ----
 
@@ -62,70 +76,72 @@ export function allCubeMoves(): CubeMove[] {
   return moves;
 }
 
-export function legalCubeMoves(state: GameState): CubeMove[] {
-  const all = allCubeMoves();
-  if (state.lastCubeMove === null) return all;
-  const forbidden = invertMove(state.lastCubeMove);
-  return all.filter(m => !movesEqual(m, forbidden));
+/** All 24 cube moves are legal on every turn (there is no banned move). */
+export function legalCubeMoves(_state?: GameState): CubeMove[] {
+  return allCubeMoves();
 }
 
-export function isReverseCubeMove(last: CubeMove, next: CubeMove): boolean {
-  return movesEqual(invertMove(last), next);
+// ---- 王手 / 詰み ----
+
+function hasLine(board: Mark[], p: Player): boolean {
+  return checkBothWin(board)[p];
 }
 
-// ---- Win resolution after step 2 ----
+/** The lines that put the player to move in check (the opponent's lines on the board). */
+export function checkLines(state: GameState): Line[] {
+  return completedLines(state.board, opponent(state.current));
+}
+
+/** Is the player to move in check (must break the opponent's line this turn)? */
+export function inCheck(state: GameState): boolean {
+  return hasLine(state.board, opponent(state.current));
+}
+
+/** Cube moves after which `attacker` no longer has any line. */
+export function breakingMoves(board: Mark[], attacker: Player): CubeMove[] {
+  return allCubeMoves().filter(m => !hasLine(applyCubeMove(board, m), attacker));
+}
+
+/** 詰み: `attacker` has a line that no cube move can break. */
+export function isMate(board: Mark[], attacker: Player): boolean {
+  return hasLine(board, attacker) && breakingMoves(board, attacker).length === 0;
+}
+
+// ---- Result of a turn (after step 2) ----
 
 export function resolveAfterCubeMove(state: GameState, move: CubeMove): GameState {
+  const mover = state.current;
+  const opp = opponent(mover);
   const newBoard = applyCubeMove(state.board, move);
   const newState: GameState = {
     ...state,
     board: newBoard,
     lastCubeMove: move,
     ply: state.ply + 1,
-    current: state.current === 'O' ? 'X' : 'O',
+    current: opp,
   };
 
-  const { O, X } = checkBothWin(newBoard);
-  if (O && X) return { ...newState, status: 'draw', winReason: 'simultaneous' };
-  if (O) {
-    return state.current === 'O'
-      ? { ...newState, status: 'win:O', winReason: 'line' }
-      : { ...newState, status: 'win:O', winReason: 'selfDestruct' };
+  const lines = checkBothWin(newBoard);
+  if (lines[opp]) {
+    // the opponent's line is still (or now) on the board at the end of your turn
+    const reason: WinReason = hasLine(state.board, opp) ? 'notBroken' : 'selfDestruct';
+    return { ...newState, status: `win:${opp}`, winReason: reason };
   }
-  if (X) {
-    return state.current === 'X'
-      ? { ...newState, status: 'win:X', winReason: 'line' }
-      : { ...newState, status: 'win:X', winReason: 'selfDestruct' };
+  if (lines[mover] && isMate(newBoard, mover)) {
+    return { ...newState, status: `win:${mover}`, winReason: 'mate' };
   }
 
-  // Turn limit check
   if (state.settings.turnLimit !== null && newState.ply >= state.settings.turnLimit) {
     return { ...newState, status: 'draw', winReason: 'turnLimit' };
   }
-
   return newState;
 }
 
-// ---- Step 1 win check ----
+// ---- Full turn helper ----
 
-export function checkStep1Win(state: GameState): boolean {
-  const { O, X } = checkBothWin(state.board);
-  return state.current === 'O' ? O : X;
-}
-
-// ---- Full turn helpers ----
-
-export function applyFullTurn(
-  state: GameState,
-  step1: Step1Action,
-  cubeMove: CubeMove,
-): GameState {
+export function applyFullTurn(state: GameState, step1: Step1Action, cubeMove: CubeMove): GameState {
   const s = step1.kind === 'place'
     ? applyStep1Place(state, step1.index)
     : applyStep1Move(state, step1.from, step1.to);
-
-  if (checkStep1Win(s)) {
-    return { ...s, status: `win:${state.current}` as 'win:O' | 'win:X', winReason: 'line' };
-  }
   return resolveAfterCubeMove(s, cubeMove);
 }

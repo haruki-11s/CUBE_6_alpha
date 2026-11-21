@@ -1,6 +1,13 @@
 import type { CubeMove, GameState, GameStatus, Player, Step1Action } from './types';
+import type { CpuLevel } from './ai';
+import { parseClock, type ClockInfo } from './clock';
 
 export type SavedPhase = 'step1' | 'step1-move-from' | 'step2';
+
+/** Who is playing: two people on one device, or a person against the CPU (optionally on a clock). */
+export type MatchInfo =
+  | { mode: 'local'; undos: number }
+  | { mode: 'cpu'; level: CpuLevel; human: Player; undos: number; clock: ClockInfo | null };
 
 export interface LogEntry {
   ply: number;
@@ -22,6 +29,7 @@ export interface SaveData extends Snapshot {
   v: 2;
   history: Snapshot[];
   elapsed: number;
+  match: MatchInfo;
 }
 
 type Obj = Record<string, unknown>;
@@ -30,7 +38,7 @@ const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInt
 const isIdx = (v: unknown): v is number => isInt(v) && v >= 0 && v < 27;
 const isPlayer = (v: unknown): v is Player => v === 'O' || v === 'X';
 const STATUSES: readonly string[] = ['playing', 'win:O', 'win:X', 'draw'];
-const REASONS: readonly string[] = ['line', 'selfDestruct', 'simultaneous', 'turnLimit'];
+const REASONS: readonly string[] = ['mate', 'notBroken', 'selfDestruct', 'turnLimit', 'timeout'];
 const PHASES: readonly string[] = ['step1', 'step1-move-from', 'step2'];
 
 export function isCubeMove(v: unknown): v is CubeMove {
@@ -107,6 +115,15 @@ function parseSnapshot(v: unknown, legacy: boolean): Snapshot | null {
   };
 }
 
+/** Saves from before the CPU mode have no `match`: they are local games (and older CPU saves have no clock). */
+export function parseMatch(v: unknown): MatchInfo {
+  const undos = isObj(v) && isInt(v.undos) && v.undos >= 0 ? v.undos : 0;
+  if (isObj(v) && v.mode === 'cpu' && isInt(v.level) && v.level >= 1 && v.level <= 6 && isPlayer(v.human)) {
+    return { mode: 'cpu', level: v.level as CpuLevel, human: v.human, undos, clock: parseClock(v.clock) };
+  }
+  return { mode: 'local', undos };
+}
+
 /** Validates (and migrates) raw JSON from localStorage. Returns null if unusable. */
 export function parseSave(raw: unknown): SaveData | null {
   if (!isObj(raw)) return null;
@@ -117,5 +134,5 @@ export function parseSave(raw: unknown): SaveData | null {
     ? raw.history.map(h => parseSnapshot(h, false)).filter((s): s is Snapshot => s !== null)
     : [];
   const elapsed = typeof raw.elapsed === 'number' && Number.isFinite(raw.elapsed) && raw.elapsed >= 0 ? raw.elapsed : 0;
-  return { v: 2, ...snap, history, elapsed };
+  return { v: 2, ...snap, history, elapsed, match: parseMatch(raw.match) };
 }

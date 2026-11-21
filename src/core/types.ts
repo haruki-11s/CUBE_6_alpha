@@ -8,7 +8,12 @@ export type CubeMove =
   | { kind: 'slide';  axis: Axis; dir: 'forward' | 'backward' };
 
 export type GameStatus = 'playing' | 'win:O' | 'win:X' | 'draw';
-export type WinReason = 'line' | 'selfDestruct' | 'simultaneous' | 'turnLimit';
+/**
+ * mate         詰み: the winner's line could not be broken by any cube move
+ * notBroken    the loser ended their turn without breaking the winner's check
+ * selfDestruct the loser's own cube move completed the winner's line
+ */
+export type WinReason = 'mate' | 'notBroken' | 'selfDestruct' | 'turnLimit' | 'timeout';
 
 export interface GameState {
   board: Mark[];

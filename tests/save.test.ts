@@ -15,6 +15,10 @@ function sample(): SaveData {
     log: [{ ply: 1, player: 'O', step1: { kind: 'place', index: 4 }, cube: null }],
     history: [{ gameState: initialGameState(), phase: 'step1', selectedFrom: null, lastMoved: null, log: [] }],
     elapsed: 1234,
+    match: {
+      mode: 'cpu', level: 4, human: 'O', undos: 2,
+      clock: { mainMs: 180_000, byoyomiMs: 30_000, left: { O: 120_000, X: 175_500 }, used: 4200 },
+    },
   };
 }
 
@@ -39,7 +43,7 @@ describe('parseSave', () => {
 
   it('rejects finished games', () => {
     const data = sample();
-    data.gameState = { ...data.gameState, status: 'win:O', winReason: 'line' };
+    data.gameState = { ...data.gameState, status: 'win:O', winReason: 'mate' };
     expect(parseSave(JSON.parse(JSON.stringify(data)))).toBeNull();
   });
 
@@ -61,6 +65,18 @@ describe('parseSave', () => {
     expect(parsed?.gameState.lastCubeMove).toEqual({ kind: 'rotate', axis: 'Y', layer: 1, dir: 'CCW' });
     expect(parsed?.history).toEqual([]);
     expect(parsed?.log).toEqual([]);
+  });
+
+  it('treats saves without match info as local games and rejects bad CPU levels', () => {
+    const raw = JSON.parse(JSON.stringify(sample()));
+    delete raw.match;
+    expect(parseSave(raw)?.match).toEqual({ mode: 'local', undos: 0 });
+    raw.match = { mode: 'cpu', level: 9, human: 'O', undos: 0 };
+    expect(parseSave(raw)?.match.mode).toBe('local');
+    raw.match = { mode: 'cpu', level: 6, human: 'X', undos: -3 };
+    expect(parseSave(raw)?.match).toEqual({ mode: 'cpu', level: 6, human: 'X', undos: 0, clock: null });
+    raw.match = { mode: 'cpu', level: 3, human: 'O', undos: 0, clock: { mainMs: 180_000, byoyomiMs: 0, left: { O: 1, X: 1 }, used: 0 } };
+    expect(parseSave(raw)?.match).toEqual({ mode: 'cpu', level: 3, human: 'O', undos: 0, clock: null }); // broken clock dropped
   });
 
   it('clears selectedFrom when it does not point at the current player', () => {

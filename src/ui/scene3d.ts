@@ -90,6 +90,7 @@ interface Particle {
 interface Ghost { mesh: THREE.Mesh<THREE.SphereGeometry, THREE.MeshStandardMaterial>; from: number; to: number; mode: 'move' | 'leave' | 'enter' }
 interface PreviewState { move: CubeMove; group: THREE.Group; ghosts: Ghost[]; moving: number[]; t0: number; pulse: Pulse[] }
 interface WinState { group: THREE.Group; pulse: Pulse[]; cells: Set<number> }
+interface CheckState { group: THREE.Group; pulse: Pulse[]; cells: Set<number> }
 interface GizmoState {
   scene: THREE.Scene; cam: THREE.OrthographicCamera;
   letters: { el: HTMLElement; pos: THREE.Vector3 }[]; bg: HTMLElement; size: number; margin: number;
@@ -143,6 +144,7 @@ export class Scene3D {
   private showSymbols = false;
   private preview: PreviewState | null = null;
   private win: WinState | null = null;
+  private check: CheckState | null = null;
   private labelsOn = false;
   private readonly labelEls = new Map<string, HTMLElement>();
   private labelEmph = new Set<string>();
@@ -675,6 +677,30 @@ export class Scene3D {
     this.win = null;
   }
 
+  // ═══════════════════════════════ 王手 display ════════════════════════════
+
+  /** Lines that put the player to move in check (pulsing beams), or none. */
+  setCheck(entries: { line: Line; player: Player }[]): void {
+    this.clearCheck();
+    if (entries.length === 0) return;
+    const group = new THREE.Group();
+    const pulse: Pulse[] = [];
+    const cells = new Set<number>();
+    for (const { line, player } of entries) {
+      group.add(this.makeBeam(line, PLAYER_COLORS[player].light, 0.05, pulse, 0.9));
+      for (const i of line) cells.add(i);
+    }
+    this.overlay.add(group);
+    this.check = { group, pulse, cells };
+  }
+
+  clearCheck(): void {
+    if (!this.check) return;
+    this.overlay.remove(this.check.group);
+    disposeTree(this.check.group, this.shared);
+    this.check = null;
+  }
+
   // ═══════════════════════════════ Animations ══════════════════════════════
 
   get isAnimating(): boolean { return this.animating > 0; }
@@ -1140,12 +1166,14 @@ export class Scene3D {
       const isH = this.hover === i;
       const isS = this.selected === i;
       const isW = !!this.win?.cells.has(i);
+      const isC = !isW && !!this.check?.cells.has(i);
       if (c.mark) {
         let glowO = 0.5, scale = 1, emi = 0.32;
         if (isT) { glowO = 0.62 + 0.25 * Math.sin(t * 4 + i); emi = 0.45; }
         if (isH) { glowO = 0.95; scale = 1.08; emi = 0.6; }
         if (isS) { glowO = 1; scale = 1.1 + 0.03 * Math.sin(t * 6); emi = 0.7; }
         if (isW) { const k = 0.5 + 0.5 * Math.sin(t * 5); glowO = 0.75 + 0.5 * k; scale = 1.06 + 0.08 * k; emi = 0.42 + 0.3 * k; }
+        if (isC) { const k = 0.5 + 0.5 * Math.sin(t * 7); glowO = Math.max(glowO, 0.7 + 0.3 * k); emi = Math.max(emi, 0.45 + 0.25 * k); }
         c.piece.material.emissiveIntensity = emi;
         if (!c.busy) {
           c.piece.scale.setScalar(scale);
@@ -1221,6 +1249,10 @@ export class Scene3D {
     if (this.win) {
       const wk = 0.7 + 0.3 * Math.sin(this.time * 4);
       for (const p of this.win.pulse) p.mat.opacity = p.base * wk;
+    }
+    if (this.check) {
+      const ck = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(this.time * 7));
+      for (const p of this.check.pulse) p.mat.opacity = p.base * ck;
     }
     const p = this.preview;
     if (!p) return;
@@ -1373,6 +1405,7 @@ export class Scene3D {
     for (const f of this.disposers) f();
     this.clearPreview();
     this.clearWin();
+    this.clearCheck();
     disposeTree(this.scene);
     if (this.gizmo) disposeTree(this.gizmo.scene);
     for (const pool of this.pools.values()) for (const s of pool) s.material.dispose();
