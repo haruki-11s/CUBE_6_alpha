@@ -27,6 +27,11 @@ const PIECE_R = 0.34;
 const AXES: readonly Axis[] = ['X', 'Y', 'Z'];
 const UP = new THREE.Vector3(0, 1, 0);
 const EMPTY_COLOR = new THREE.Color(0x4a5890);
+/** Cube in the owner's colour around each piece (faint fill, bright edges), so the board reads as claimed space. */
+const TINT_SIZE = 1.1;       // edge length; the cell pitch is BASE_SPACING
+// The scene is blue-tinted, so blue needs more opacity than red to show as strongly.
+const TINT_FILL: Readonly<Record<Player, number>> = { O: 0.15, X: 0.08 };
+const TINT_EDGE: Readonly<Record<Player, number>> = { O: 0.7, X: 0.6 };
 const VIEWS: Readonly<Record<ViewPreset, { theta: number; phi: number }>> = {
   iso: { theta: Math.PI / 4, phi: 1.0 },
   front: { theta: 0, phi: Math.PI / 2 - 0.1 },
@@ -78,9 +83,25 @@ interface CellView {
   symbol: THREE.Sprite;
   marker: THREE.Mesh<THREE.SphereGeometry, THREE.MeshBasicMaterial>;
   halo: THREE.Sprite;
+  tint: Tint;
   mark: Mark;
   dim: number;     // 1 = normal, < 1 = faded (pieces about to move in a preview)
   busy: boolean;   // an animation owns this cell's scale / opacity
+}
+
+/** The owner's-colour cube of a cell. `edge` is a child of `fill`, so it shares its visibility, position and scale. */
+interface Tint {
+  fill: THREE.Mesh<THREE.BoxGeometry, THREE.MeshBasicMaterial>;
+  edge: THREE.LineSegments<THREE.EdgesGeometry, THREE.LineBasicMaterial>;
+}
+function tintColor(t: Tint, m: Player): void {
+  t.fill.material.color.setHex(PLAYER_COLORS[m].hex);
+  t.edge.material.color.setHex(PLAYER_COLORS[m].light);
+}
+/** k: 0 = invisible … 1 = full strength (fades, and dimming in previews). */
+function tintAlpha(t: Tint, m: Mark, k: number): void {
+  t.fill.material.opacity = m ? TINT_FILL[m] * k : 0;
+  t.edge.material.opacity = m ? TINT_EDGE[m] * k : 0;
 }
 
 interface Particle {
@@ -120,6 +141,8 @@ export class Scene3D {
   private readonly ghostGeo = new THREE.SphereGeometry(PIECE_R * 0.78, 24, 16);
   private readonly markerGeo = new THREE.SphereGeometry(0.075, 12, 8);
   private readonly hitGeo = new THREE.SphereGeometry(0.47, 12, 8);
+  private readonly tintGeo = new THREE.BoxGeometry(TINT_SIZE, TINT_SIZE, TINT_SIZE);
+  private readonly tintEdgeGeo = new THREE.EdgesGeometry(this.tintGeo);
   private readonly hitMat = new THREE.MeshBasicMaterial({ visible: false });
   private readonly shared: ReadonlySet<unknown>;
 
@@ -193,7 +216,7 @@ export class Scene3D {
     this.renderer.toneMappingExposure = 1.1;
     this.renderer.autoClear = false;
 
-    this.shared = new Set<unknown>([this.pieceGeo, this.ghostGeo, this.markerGeo, this.hitGeo, this.hitMat]);
+    this.shared = new Set<unknown>([this.pieceGeo, this.ghostGeo, this.markerGeo, this.hitGeo, this.hitMat, this.tintGeo, this.tintEdgeGeo]);
 
     this.scene.fog = new THREE.Fog(0x070914, 9, 24);
     this.scene.add(new THREE.HemisphereLight(0xb4c8ff, 0x1c1236, 1.1));
@@ -322,12 +345,22 @@ export class Scene3D {
       const hit = new THREE.Mesh(this.hitGeo, this.hitMat);
       hit.userData['index'] = i;
       this.hitMeshes.push(hit);
-      group.add(piece, glow, symbol, marker, halo, hit);
+      const tint = this.makeTint();
+      group.add(piece, glow, symbol, marker, halo, hit, tint.fill);
       this.root.add(group);
-      const cell: CellView = { index: i, group, piece, glow, symbol, marker, halo, mark: null, dim: 1, busy: false };
+      const cell: CellView = { index: i, group, piece, glow, symbol, marker, halo, tint, mark: null, dim: 1, busy: false };
       this.cells.push(cell);
       this.paint(cell, null);
     }
+  }
+
+  private makeTint(): Tint {
+    const fill = new THREE.Mesh(this.tintGeo, basicMat(0xffffff, 0));
+    const edge = new THREE.LineSegments(this.tintEdgeGeo, new THREE.LineBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0, depthWrite: false, toneMapped: false,
+    }));
+    fill.add(edge);
+    return { fill, edge };
   }
 
   private buildLabels(): void {
@@ -388,8 +421,10 @@ export class Scene3D {
     c.symbol.visible = on && this.showSymbols;
     c.marker.visible = !on;
     c.halo.visible = !on;
+    c.tint.fill.visible = on;
     if (mark) {
       const P = PLAYER_COLORS[mark];
+      tintColor(c.tint, mark);
       c.piece.material.color.setHex(P.hex);
       c.piece.material.emissive.setHex(P.hex);
       c.glow.material.color.setHex(P.glow);
@@ -713,6 +748,7 @@ export class Scene3D {
       this.paint(c, mark);
       c.busy = true;
       c.piece.scale.setScalar(0.001);
+      tintAlpha(c.tint, mark, 0);
       const wp = c.group.getWorldPosition(new THREE.Vector3());
       const col = PLAYER_COLORS[mark].light;
       this.shockwave(wp, col);
@@ -720,6 +756,7 @@ export class Scene3D {
       await tween(440, t => {
         c.piece.scale.setScalar(Math.max(0.001, ease.outBack(t)));
         c.glow.material.opacity = 0.9 * t;
+        tintAlpha(c.tint, mark, t);
       }, ease.linear);
     } finally {
       c.busy = false;
@@ -737,6 +774,11 @@ export class Scene3D {
       this.paint(a, null);
       this.paint(b, mark);
       b.busy = true;
+      // The colour does not fly with the piece: it fades out at the start cell and fills the
+      // destination after landing.
+      a.tint.fill.visible = true;
+      tintColor(a.tint, mark);
+      tintAlpha(b.tint, mark, 0);
       const start = this.home(from), end = this.home(to);
       const dir = end.clone().sub(start);
       const dist = dir.length();
@@ -755,19 +797,23 @@ export class Scene3D {
         const e = ease.inOutCubic(t);
         b.group.position.lerpVectors(start, end, e).addScaledVector(up, 4 * h * e * (1 - e));
         b.piece.scale.setScalar(1 + 0.12 * Math.sin(Math.PI * e));
+        tintAlpha(a.tint, mark, 1 - e);
         if (t - lastTrail > 0.04 && t < 0.95) {
           lastTrail = t;
           this.spawn(glowTexture(), b.group.position, new THREE.Vector3(), col, 0.45, 0.55, 0.1, 0.6, 0);
         }
       }, ease.linear);
+      a.tint.fill.visible = a.mark !== null;
       b.group.position.copy(end);
       this.shockwave(end, col);
       await tween(180, t => {
         const sq = 1 - 0.2 * Math.sin(Math.PI * t);
         const w = 1 / Math.sqrt(sq);
         b.piece.scale.set(w, sq, w);
+        tintAlpha(b.tint, mark, t);
       }, ease.linear);
     } finally {
+      a.tint.fill.visible = a.mark !== null;
       b.busy = false;
       b.piece.scale.setScalar(1);
       this.home(to, b.group.position);
@@ -823,7 +869,10 @@ export class Scene3D {
     const leavingCoord = move.dir === 'forward' ? 0 : 2;
     const perm = movePermutation(move);
     const leaving = this.cells.filter(c => fromIndex(c.index)[ax] === leavingCoord);
-    const clones: { mesh: THREE.Mesh<THREE.SphereGeometry, THREE.MeshPhysicalMaterial>; glow: THREE.Sprite; from: THREE.Vector3; to: THREE.Vector3 }[] = [];
+    const clones: {
+      mesh: THREE.Mesh<THREE.SphereGeometry, THREE.MeshPhysicalMaterial>; glow: THREE.Sprite;
+      tint: Tint; mark: Player; from: THREE.Vector3; to: THREE.Vector3;
+    }[] = [];
     try {
       for (const c of leaving) {
         c.busy = true;
@@ -836,12 +885,15 @@ export class Scene3D {
         const glow = new THREE.Sprite(c.glow.material.clone());
         glow.material.color.setHex(P.glow);
         glow.scale.setScalar(1.45);
+        const tint = this.makeTint();
+        tintColor(tint, c.mark);
         const to = this.home(perm[c.index]);
         const from = to.clone().sub(d);
         mesh.position.copy(from);
         glow.position.copy(from);
-        this.root.add(mesh, glow);
-        clones.push({ mesh, glow, from, to });
+        tint.fill.position.copy(from);
+        this.root.add(mesh, glow, tint.fill);
+        clones.push({ mesh, glow, tint, mark: c.mark, from, to });
       }
       const starts = this.cells.map(c => this.home(c.index));
       await tween(600, t => {
@@ -853,14 +905,19 @@ export class Scene3D {
           c.glow.material.opacity = 0.5 * o;
           c.symbol.material.opacity = o;
           c.marker.material.opacity = 0.6 * o;
+          tintAlpha(c.tint, c.mark, o);
           c.piece.scale.setScalar(1 - 0.35 * e);
+          c.tint.fill.scale.setScalar(1 - 0.35 * e);
         }
         for (const k of clones) {
           k.mesh.position.lerpVectors(k.from, k.to, e);
           k.glow.position.copy(k.mesh.position);
+          k.tint.fill.position.copy(k.mesh.position);
           k.mesh.material.opacity = e;
           k.glow.material.opacity = 0.5 * e;
+          tintAlpha(k.tint, k.mark, e);
           k.mesh.scale.setScalar(0.65 + 0.35 * e);
+          k.tint.fill.scale.setScalar(0.65 + 0.35 * e);
         }
       }, ease.linear);
       for (const c of this.cells) this.home(c.index, c.group.position);
@@ -869,13 +926,16 @@ export class Scene3D {
       this.shake(0.04, 0.16);
     } finally {
       for (const k of clones) {
-        this.root.remove(k.mesh, k.glow);
+        this.root.remove(k.mesh, k.glow, k.tint.fill);
         k.mesh.material.dispose();
         k.glow.material.dispose();
+        k.tint.fill.material.dispose();
+        k.tint.edge.material.dispose();
       }
       for (const c of leaving) {
         c.busy = false;
         c.piece.scale.setScalar(1);
+        c.tint.fill.scale.setScalar(1);
       }
       this.animating--;
     }
@@ -887,7 +947,10 @@ export class Scene3D {
     const on = this.cells.filter(c => c.mark);
     try {
       on.forEach(c => { c.busy = true; });
-      await tween(380, t => on.forEach(c => c.piece.scale.setScalar(Math.max(0.001, 1 - t))), ease.inCubic);
+      await tween(380, t => on.forEach(c => {
+        c.piece.scale.setScalar(Math.max(0.001, 1 - t));
+        tintAlpha(c.tint, c.mark, 1 - t);
+      }), ease.inCubic);
     } finally {
       on.forEach(c => { c.busy = false; });
       this.setBoard(Array<Mark>(27).fill(null));
@@ -1179,6 +1242,7 @@ export class Scene3D {
           c.piece.scale.setScalar(scale);
           c.glow.material.opacity = glowO * c.dim;
           c.symbol.material.opacity = c.dim;
+          tintAlpha(c.tint, c.mark, c.dim);
         }
         if (c.symbol.visible) {
           // keep the ○/× glyph on the sphere surface facing the camera
