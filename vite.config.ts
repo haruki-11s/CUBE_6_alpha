@@ -1,7 +1,9 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  base: '/CUBE_6_alpha_ver.1.0.0/',
+  // Relative asset paths, so the build works at any GitHub Pages path. Renaming the repository
+  // moves the site to https://<user>.github.io/<new name>/, and a fixed '/<repo>/' base broke it.
+  base: './',
   build: {
     // three.js is ~550 kB on its own; keep it in a separate, long-cached chunk
     chunkSizeWarningLimit: 700,
