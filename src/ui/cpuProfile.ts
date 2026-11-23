@@ -13,8 +13,9 @@ export const CPU_LEVELS: Readonly<Record<CpuLevel, { name: string; desc: string 
 export const NORMAL_LEVELS: readonly CpuLevel[] = [1, 2, 3, 4, 5];
 export const HIDDEN_LEVEL: CpuLevel = 6;
 
+/** "Lv.4": the strengths are shown by number only. */
 export function levelLabel(l: CpuLevel): string {
-  return `Lv.${l} ${CPU_LEVELS[l].name}`;
+  return `Lv.${l}`;
 }
 
 // ── Records & unlock (per browser) ─────────────────────────────────────────

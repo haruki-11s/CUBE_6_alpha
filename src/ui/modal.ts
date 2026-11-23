@@ -11,8 +11,12 @@ export interface ModalAction {
 
 export interface ModalOptions {
   title?: string;
+  /** Small English label after the title ("SETTINGS"), as on the title menu. */
+  subtitle?: string;
   content: string | HTMLElement;
   actions?: ModalAction[];
+  /** A second, smaller window shown under the dialog (same backdrop, closes with it). */
+  aside?: string | HTMLElement;
   closable?: boolean;
   className?: string;
   onClose?: () => void;
@@ -20,6 +24,8 @@ export interface ModalOptions {
 
 export interface ModalHandle {
   el: HTMLElement;
+  /** The `aside` window, when there is one. */
+  aside: HTMLElement | null;
   close: () => void;
 }
 
@@ -45,6 +51,12 @@ export function openModal(o: ModalOptions): ModalHandle {
     h.className = 'modal-title';
     h.id = id;
     h.textContent = o.title;
+    if (o.subtitle) {
+      const sub = document.createElement('small');
+      sub.className = 'modal-sub';
+      sub.textContent = o.subtitle;
+      h.appendChild(sub);
+    }
     dlg.appendChild(h);
     dlg.setAttribute('aria-labelledby', id);
   }
@@ -84,7 +96,22 @@ export function openModal(o: ModalOptions): ModalHandle {
     dlg.appendChild(row);
   }
 
-  back.appendChild(dlg);
+  // with an aside, both windows sit in one column and Tab cycles through both
+  let trap: HTMLElement = dlg;
+  let side: HTMLElement | null = null;
+  if (o.aside) {
+    side = document.createElement('div');
+    side.className = 'modal modal-aside';
+    if (typeof o.aside === 'string') side.innerHTML = o.aside;
+    else side.appendChild(o.aside);
+    const stack = document.createElement('div');
+    stack.className = 'modal-stack';
+    stack.append(dlg, side);
+    back.appendChild(stack);
+    trap = stack;
+  } else {
+    back.appendChild(dlg);
+  }
   document.body.appendChild(back);
   openCount++;
   requestAnimationFrame(() => back.classList.add('show'));
@@ -112,7 +139,7 @@ export function openModal(o: ModalOptions): ModalHandle {
       return;
     }
     if (e.key === 'Tab') {
-      const items = [...dlg.querySelectorAll<HTMLElement>(FOCUSABLE)];
+      const items = [...trap.querySelectorAll<HTMLElement>(FOCUSABLE)];
       if (!items.length) return;
       const first = items[0], last = items[items.length - 1];
       if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
@@ -120,10 +147,11 @@ export function openModal(o: ModalOptions): ModalHandle {
     }
   }
   document.addEventListener('keydown', onKey, true);
-  back.addEventListener('pointerdown', e => { if (e.target === back && closable) close(); });
+  // the empty space around the window(s) acts as the backdrop
+  back.addEventListener('pointerdown', e => { if ((e.target === back || (side && e.target === trap)) && closable) close(); });
 
   const f: HTMLElement | null = focusTarget ?? dlg.querySelector<HTMLElement>(FOCUSABLE);
   setTimeout(() => f?.focus({ preventScroll: true }), 30);
 
-  return { el: dlg, close };
+  return { el: dlg, aside: side, close };
 }

@@ -15,12 +15,16 @@ export type ControlEvent =
   | { type: 'hoverMove'; move: CubeMove | null }
   | { type: 'selectMove'; move: CubeMove }
   | { type: 'confirm' }
+  /** 取消: take back this turn's step ① (placement or move) and do it again. */
   | { type: 'cancel' }
-  | { type: 'undo' }
   | { type: 'peekLast'; on: boolean }
   | { type: 'deselectPiece' }
   | { type: 'showResult' }
+  /** 「盤面を確認する」 after 詰み. */
+  | { type: 'review' }
+  /** 「誤審の訂正」: play on from the 詰み position. */
   | { type: 'playOn' }
+  | { type: 'nextLevel' }
   | { type: 'replay' }
   | { type: 'title' };
 
@@ -31,19 +35,18 @@ export interface ControlsView {
   canPlace: boolean;
   /** "配置" or "移動" — what step ① of this turn is / was. */
   step1Label: string;
-  canUndo: boolean;
   log: LogEntry[];
   resultText?: string;
-  /** Lost to 詰み: the loser may still play its turn to check (「まだ負けてない」). */
-  canPlayOn?: boolean;
-  /** Display names ("〇（青）" / "あなた" / "CPU"). */
+  /** Lost to 詰み: the final board can be reviewed (「盤面を確認する」). */
+  canReview?: boolean;
+  /** The board is being reviewed: cube moves are previewed only, with 「誤審の訂正」. */
+  reviewing?: boolean;
+  /** CPU games: there is a stronger level to go on to. */
+  nextLevel?: boolean;
+  /** Display names ("PLAYER 1" / "あなた" / "CPU"). */
   names: Readonly<Record<Player, string>>;
   /** CPU games: the CPU's side, its strength label and whether it is acting now. */
   cpu: { side: Player; label: string; acting: boolean } | null;
-  /** Games on a clock: each player's clock (kept live with setClocks). */
-  clock: Readonly<Record<Player, ClockFace>> | null;
-  /** Why 待った is unavailable in this game (button tooltip). */
-  undoNote?: string;
   /** The player to move is in check (王手): who checks, and (hints on) how many cube moves break it. */
   check: { by: Player; escapes: number | null } | null;
 }
@@ -69,6 +72,7 @@ function div(cls: string, text?: string): HTMLDivElement {
  * Right-hand panel. `render()` rebuilds it on phase changes only; selection,
  * hover preview and busy state are applied in place (no DOM rebuild), so
  * pointer events can never race with a re-render.
+ * (Whose turn it is, the hands and the clocks are in the top bar.)
  */
 export class Controls {
   onEvent?: (e: ControlEvent) => void;
@@ -78,10 +82,8 @@ export class Controls {
   private outcomeEl: HTMLElement | null = null;
   private confirmBtn: HTMLButtonElement | null = null;
   private cancelBtn: HTMLButtonElement | null = null;
-  private undoBtn: HTMLButtonElement | null = null;
   private selected: CubeMove | null = null;
   private busy = false;
-  private canUndo = false;
   private logOpen = false;
   private cpuActing = false;
   private cpuSide: Player | null = null;
@@ -95,15 +97,13 @@ export class Controls {
     this.container.innerHTML = '';
     this.moveBtns.clear();
     this.selLabel = this.outcomeEl = null;
-    this.confirmBtn = this.cancelBtn = this.undoBtn = null;
-    this.canUndo = v.canUndo;
+    this.confirmBtn = this.cancelBtn = null;
     this.cpuActing = !!v.cpu?.acting && s.status === 'playing';
     this.cpuSide = v.cpu?.side ?? null;
     this.container.classList.toggle('cpu-acting', this.cpuActing);
 
-    this.container.appendChild(this.turnCard(v));
     if (s.status !== 'playing') {
-      this.container.appendChild(this.resultCard(v));
+      this.container.appendChild(v.reviewing ? this.reviewCard() : this.resultCard(v));
     } else if (v.phase === 'step2') {
       this.container.appendChild(this.opCard(v));
       this.container.appendChild(this.cpuActing ? this.cpuMoveCard() : this.confirmCard());
@@ -117,42 +117,6 @@ export class Controls {
   }
 
   // ── Cards ────────────────────────────────────────────────────────────────
-  private turnCard(v: ControlsView): HTMLElement {
-    const s = v.state;
-    const P = PLAYER_COLORS[s.current];
-    const over = s.status !== 'playing';
-    const step1 = v.phase !== 'step2';
-    const thinking = this.cpuActing && step1;
-    const el = document.createElement('section');
-    el.className = `card turn-card${this.cpuActing ? ' cpu' : ''}`;
-    el.innerHTML = `
-      <div class="tc-row">
-        <span class="tc-chip ${over ? 'end' : s.current.toLowerCase()}">${over ? icon('trophy') : P.glyph}</span>
-        <div class="tc-who">
-          <div class="tc-name">${over ? '対局終了' : `${v.names[s.current]}の番`}${v.check && !over ? '<span class="tc-check">王手</span>' : ''}${thinking ? '<span class="think-dots" aria-label="考え中"><i></i><i></i><i></i></span>' : ''}</div>
-          <div class="tc-sub">手数 ${s.ply}${s.settings.turnLimit ? ` / ${s.settings.turnLimit}` : ''}${v.cpu ? `<span class="tc-vs">VS ${v.cpu.label}</span>` : ''}</div>
-        </div>
-      </div>
-      ${over ? '' : `<ol class="stepper" aria-label="手番の進行">
-        <li class="${step1 ? 'on' : 'done'}"><b>1</b>${v.step1Label}</li>
-        <li class="${step1 ? '' : 'on'}"><b>2</b>キューブ操作</li>
-      </ol>`}
-      <div class="hands">${(['O', 'X'] as const).map(p => this.handRow(p, s, v.cpu ? v.names[p] : '', v.clock?.[p] ?? null)).join('')}</div>`;
-    return el;
-  }
-
-  private handRow(p: Player, s: GameState, name: string, clock: ClockFace | null): string {
-    const n = s.hand[p];
-    const P = PLAYER_COLORS[p];
-    const dots = Array.from({ length: 6 }, (_, i) => `<i class="${i < n ? 'in' : ''}"></i>`).join('');
-    const cur = s.current === p && s.status === 'playing';
-    return `<div class="hand ${p.toLowerCase()}${cur ? ' cur' : ''}" title="${name || P.label} 手駒 ${n}／6">
-      <span class="hand-sym">${P.glyph}</span>${name ? `<span class="hand-name">${name}</span>` : ''}<span class="dots">${dots}</span>
-      <span class="hand-n">${n > 0 ? `手駒 ${n}` : '移動フェーズ'}</span>${clock
-        ? `<span class="hand-clock ${clock.state}" data-clock="${p}" title="持ち時間">${icon('timer')}<b>${clock.text}</b></span>`
-        : ''}</div>`;
-  }
-
   private cpuThinkCard(label: string): HTMLElement {
     const el = document.createElement('section');
     el.className = 'card info-card cpu-card';
@@ -177,7 +141,7 @@ export class Controls {
     const s = v.state;
     const el = document.createElement('section');
     el.className = 'card info-card';
-    let html = '';
+    let html = `<div class="card-title"><span class="step-no">1</span>${v.step1Label}</div>`;
     if (v.check) {
       html += `<div class="check-note" role="alert"><b>王手！</b>${v.names[v.check.by]}の列が揃っています。①のあと、②の操作でこの列を崩してください。</div>`;
     }
@@ -215,7 +179,18 @@ export class Controls {
   private opCard(v: ControlsView): HTMLElement {
     const el = document.createElement('section');
     el.className = 'card op-card';
-    el.innerHTML = '<div class="card-title">キューブ操作 <span class="req">必須</span></div>';
+    el.innerHTML = '<div class="card-title"><span class="step-no">2</span>キューブ操作</div>';
+    el.appendChild(this.opGrid());
+    if (v.check) {
+      const n = v.check.escapes;
+      el.querySelector('.card-title')?.insertAdjacentHTML('afterend', `<div class="check-note" role="alert"><b>王手！</b>${v.names[v.check.by]}の列を崩す操作を選んでください。${n !== null ? `<span class="check-n">崩せる操作 ${n}通り</span>` : ''}</div>`);
+    }
+    return el;
+  }
+
+  /** The 24 cube moves: 3 axes × (3 layers × 2 directions + 2 slides), with the legend. */
+  private opGrid(): HTMLElement {
+    const wrap = div('op-wrap');
     const grid = div('op-grid');
     grid.setAttribute('role', 'group');
     grid.setAttribute('aria-label', 'キューブ操作の選択');
@@ -240,14 +215,10 @@ export class Controls {
       );
       grid.appendChild(cell);
     }
-    el.appendChild(grid);
-    el.insertAdjacentHTML('beforeend', `<div class="op-legend">
+    wrap.appendChild(grid);
+    wrap.insertAdjacentHTML('beforeend', `<div class="op-legend">
       <span>${icon('rotCCW')}${icon('rotCW')}＋側から見た回転</span><span><b>−</b><b>＋</b>繰越の向き</span></div>`);
-    if (v.check) {
-      const n = v.check.escapes;
-      el.insertAdjacentHTML('afterbegin', `<div class="check-note" role="alert"><b>王手！</b>${v.names[v.check.by]}の列を崩す操作を選んでください。${n !== null ? `<span class="check-n">崩せる操作 ${n}通り</span>` : ''}</div>`);
-    }
-    return el;
+    return wrap;
   }
 
   private moveBtn(m: CubeMove): HTMLButtonElement {
@@ -278,7 +249,7 @@ export class Controls {
       <div class="outcome" hidden></div>
       <div class="confirm-row">
         <button type="button" class="btn ok big" data-act="confirm">${icon('check')}確定<kbd>Enter</kbd></button>
-        <button type="button" class="btn ghost" data-act="cancel">取消<kbd>Esc</kbd></button>
+        <button type="button" class="btn ghost" data-act="cancel" title="①の配置／移動を取り消して、やり直します">${icon('undo')}取消<kbd>Esc</kbd></button>
       </div>`;
     this.selLabel = el.querySelector<HTMLElement>('.sel-label');
     this.outcomeEl = el.querySelector<HTMLElement>('.outcome');
@@ -292,17 +263,41 @@ export class Controls {
   private resultCard(v: ControlsView): HTMLElement {
     const el = document.createElement('section');
     el.className = 'card result-card';
-    el.innerHTML = `<p class="lead">${v.resultText ?? '対局終了'}</p>
+    el.innerHTML = `<p class="result-lead">${v.resultText ?? '対局終了'}</p>
       <div class="col-btns">
         <button type="button" class="btn primary" data-act="result">${icon('trophy')}結果を表示</button>
-        ${v.canPlayOn ? `<button type="button" class="btn ok" data-act="play-on" title="この局面から自分の番を指して、列を崩せるか確かめる">${icon('resume')}まだ負けてない</button>` : ''}
+        ${v.canReview ? `<button type="button" class="btn ok" data-act="review">${icon('eye')}盤面を確認する</button>` : ''}
         <button type="button" class="btn" data-act="replay">${icon('refresh')}もう一度</button>
+        ${v.nextLevel ? `<button type="button" class="btn" data-act="next">${icon('next')}次のレベル</button>` : ''}
         <button type="button" class="btn ghost" data-act="title">${icon('home')}タイトルへ</button>
       </div>`;
     el.querySelector('[data-act="result"]')?.addEventListener('click', () => this.emit({ type: 'showResult' }));
-    el.querySelector('[data-act="play-on"]')?.addEventListener('click', () => this.emit({ type: 'playOn' }));
+    el.querySelector('[data-act="review"]')?.addEventListener('click', () => this.emit({ type: 'review' }));
     el.querySelector('[data-act="replay"]')?.addEventListener('click', () => this.emit({ type: 'replay' }));
+    el.querySelector('[data-act="next"]')?.addEventListener('click', () => this.emit({ type: 'nextLevel' }));
     el.querySelector('[data-act="title"]')?.addEventListener('click', () => this.emit({ type: 'title' }));
+    return el;
+  }
+
+  /** 「盤面を確認する」: preview any cube move on the final board; 「誤審の訂正」 plays on. */
+  private reviewCard(): HTMLElement {
+    const el = document.createElement('section');
+    el.className = 'card review-card';
+    el.innerHTML = `<div class="card-title">${icon('eye')}盤面を確認中</div>
+      <p class="lead">操作を選ぶと、その操作のあとの盤面を確認できます。<small>対局は進みません。</small></p>`;
+    el.appendChild(this.opGrid());
+    el.insertAdjacentHTML('beforeend', `
+      <div class="sel-label empty">↑ 操作を選んでください</div>
+      <div class="outcome" hidden></div>
+      <div class="misjudge">
+        <button type="button" class="btn ok" data-act="play-on">${icon('flag')}誤審の訂正</button>
+        <p>誤審である場合は、このボタンを押すことでゲームを続行できます。</p>
+      </div>
+      <button type="button" class="btn ghost" data-act="result">${icon('trophy')}結果に戻る</button>`);
+    this.selLabel = el.querySelector<HTMLElement>('.sel-label');
+    this.outcomeEl = el.querySelector<HTMLElement>('.outcome');
+    el.querySelector('[data-act="play-on"]')?.addEventListener('click', () => this.emit({ type: 'playOn' }));
+    el.querySelector('[data-act="result"]')?.addEventListener('click', () => this.emit({ type: 'showResult' }));
     return el;
   }
 
@@ -313,13 +308,10 @@ export class Controls {
       ? v.log.map(e => this.logItem(e)).join('')
       : '<li class="empty">まだ記録はありません</li>';
     el.innerHTML = `
-      <button type="button" class="btn" data-act="undo" title="${v.undoNote ?? (this.cpuSide ? 'CPUの手も含めて、自分の直前の操作まで戻します' : '直前の操作を取り消します')}">${icon('undo')}${this.cpuSide ? '待った' : '一手戻す'}<kbd>U</kbd></button>
       <details class="log"${this.logOpen ? ' open' : ''}>
         <summary>${icon('list')}棋譜<span class="n">${v.log.length}</span></summary>
         <ol>${items}</ol>
       </details>`;
-    this.undoBtn = el.querySelector<HTMLButtonElement>('[data-act="undo"]');
-    this.undoBtn?.addEventListener('click', () => { if (!this.busy) this.emit({ type: 'undo' }); });
     const det = el.querySelector('details');
     const ol = el.querySelector('ol');
     const toBottom = (): void => { if (ol) ol.scrollTop = ol.scrollHeight; };
@@ -372,19 +364,6 @@ export class Controls {
     }
   }
 
-  /** Live clock update without rebuilding the panel. */
-  setClocks(faces: Readonly<Record<Player, ClockFace>>): void {
-    for (const p of ['O', 'X'] as const) {
-      const el = this.container.querySelector<HTMLElement>(`[data-clock="${p}"]`);
-      if (!el) continue;
-      const f = faces[p];
-      const cls = `hand-clock ${f.state}`;
-      if (el.className !== cls) el.className = cls;
-      const b = el.querySelector('b');
-      if (b && b.textContent !== f.text) b.textContent = f.text;
-    }
-  }
-
   setBusy(b: boolean): void {
     this.busy = b;
     this.applyBusy();
@@ -397,13 +376,13 @@ export class Controls {
       btn.setAttribute('aria-pressed', String(on));
     }
     if (this.confirmBtn) this.confirmBtn.disabled = !this.selected || this.busy;
-    if (this.cancelBtn) this.cancelBtn.disabled = !this.selected || this.busy;
+    // 取消 goes back to step ①, so it works whether or not a move is picked
+    if (this.cancelBtn) this.cancelBtn.disabled = this.busy;
   }
 
   private applyBusy(): void {
     this.container.classList.toggle('busy', this.busy);
     for (const { btn } of this.moveBtns.values()) btn.disabled = this.busy;
-    if (this.undoBtn) this.undoBtn.disabled = this.busy || !this.canUndo;
     this.applySelected();
   }
 }

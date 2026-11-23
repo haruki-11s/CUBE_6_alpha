@@ -78,21 +78,24 @@ function svgSlide(): string {
 export function rulesHTML(): string {
   return `
   <div class="rules">
-    <section>
+    <nav class="rules-nav" aria-label="目次">
+      <button type="button" data-to="r-goal">目的</button><button type="button" data-to="r-flow">手番の流れ</button><button type="button" data-to="r-ops">キューブ操作</button><button type="button" data-to="r-win">勝敗</button><button type="button" data-to="r-cpu">CPU対戦</button><button type="button" data-to="r-keys">操作方法</button>
+    </nav>
+    <section id="r-goal">
       <h3><span class="rn">1</span>目的</h3>
       <div class="rule-split">
         <p>3×3×3 の立体盤で、自分の駒を<b>一直線に3つ</b>並べたら勝ち。縦・横・面の斜め・<b>立体対角線</b>を合わせて <b>49本</b> のラインがあります。</p>
         <figure>${svgLines()}<figcaption><span style="color:#3d8bff">■</span>直線 <span style="color:#ff3b5c">■</span>面の斜め <span style="color:#b47cff">■</span>立体対角線</figcaption></figure>
       </div>
     </section>
-    <section>
+    <section id="r-flow">
       <h3><span class="rn">2</span>手番の流れ</h3>
       <ol class="flow">
         <li><b>① 配置 / 移動</b>手駒（各6個）があるうちは空きマスに<b>配置</b>。6個すべて置いたら、自分の駒を1つ好きな空きマスへ<b>移動</b>します。</li>
-        <li><b>② キューブ操作（必須）</b>「回転」か「繰越」を必ず1回行います。24通りの操作はいつでもすべて選べます。パスはできません。</li>
+        <li><b>② キューブ操作（必須）</b>「回転」か「繰越」を必ず1回行います。24通りの操作はいつでもすべて選べます。パスはできません。「確定」する前なら、<b>「取消」</b>で①の配置／移動をやり直せます。</li>
       </ol>
     </section>
-    <section>
+    <section id="r-ops">
       <h3><span class="rn">3</span>キューブ操作</h3>
       <div class="dia-row">
         <figure>${svgRotate()}<figcaption><b>回転</b>：X・Y・Z いずれかの軸の<b>層（0〜2）</b>を90°回します。↺／↻ は<b>その軸の＋側から見た</b>向きです。</figcaption></figure>
@@ -100,7 +103,7 @@ export function rulesHTML(): string {
       </div>
       <p class="note">操作を選ぶと、3D表示に<b>対象の層（色付きの枠）</b>と<b>駒の動き（半透明の予告）</b>、見取り図に<b>操作後の配置</b>が表示されます。軸の色：<b class="ax-x">X＝緑</b>・<b class="ax-y">Y＝黄</b>・<b class="ax-z">Z＝紫</b></p>
     </section>
-    <section>
+    <section id="r-win">
       <h3><span class="rn">4</span>勝敗（王手ルール）</h3>
       <p class="lead-p">列は<b>②まで終えた時点</b>で判定します。①で揃えただけでは、まだ勝ちではありません。</p>
       <ul class="cards3">
@@ -109,22 +112,21 @@ export function rulesHTML(): string {
         <li class="c-lose"><b>負け</b>自分の番を終えた時点で相手の列が盤上にあると負け（王手を崩せなかった／自分の操作で相手の列を揃えた）。</li>
       </ul>
       <p class="note">盤の中心を通る<b>縦・横・奥の3本</b>の列は、どの操作でも崩れません（揃えば詰み）。手数上限（設定）に達すると引き分けです。</p>
-      <p class="note">詰みで負けたときは、結果画面の<b>「まだ負けてない」</b>で、その局面から自分の番を指して確かめられます（崩せなければ、その番を終えた時点で負け）。</p>
+      <p class="note">詰みで負けたときは、結果と一緒に出る<b>「盤面を確認する」</b>で、24通りの操作それぞれのあとの盤面を確かめられます。誤審だと思うときは、そこで<b>「誤審の訂正」</b>を押すと、その局面から自分の番を指して対局を続けられます（崩せなければ、その番を終えた時点で負け）。</p>
     </section>
-    <section>
+    <section id="r-cpu">
       <h3><span class="rn">5</span>CPU対戦</h3>
-      <p>強さは <b>Lv.1 初心者</b>〜<b>Lv.5 上級者</b> の5段階。対戦前に強さと先手・後手を選べます。あなたは <b style="color:#9cc6ff">〇（青）</b> です。</p>
-      <p><b>持ち時間</b>：お互いに3分。使い切ると1手ごとに<b>秒読み</b>（10秒 または 30秒）になり、時間内に②の確定まで終えられないと<b>時間切れ負け</b>です。持ち時間ありの対局では「待った」はできません。アプリを閉じたり切り替えたりしている間は時計が止まります。</p>
-      <p class="note">CPU の手番では、置く場所と<b>選んだキューブ操作</b>が3Dと見取り図に表示されてから実行されます。持ち時間「なし（練習）」の対局では、<b>「待った」</b>（<kbd>U</kbd>）でCPUの手ごと自分の手番まで戻せます。</p>
+      <p>強さは <b>Lv.1</b>〜<b>Lv.5</b> の5段階。対戦前に強さと先手・後手を選べます。あなたは <b style="color:#9cc6ff">〇（青）</b> です。結果画面の<b>「次のレベル」</b>で、ひとつ上の強さにそのまま挑戦できます。</p>
+      <p><b>持ち時間</b>：お互いに3分。使い切ると1手ごとに<b>秒読み</b>（10秒 または 30秒）になり、時間内に②の確定まで終えられないと<b>時間切れ負け</b>です。アプリを閉じたり切り替えたりしている間は時計が止まります。</p>
+      <p class="note">CPU の手番では、置く場所と<b>選んだキューブ操作</b>が3Dと見取り図に表示されてから実行されます。</p>
     </section>
-    <section>
+    <section id="r-keys">
       <h3><span class="rn">6</span>操作方法</h3>
       <table class="keys">
         <tr><td>クリック / タップ</td><td>マスを選択（3D・見取り図のどちらでも可）</td></tr>
         <tr><td>ドラッグ</td><td>視点を回転（盤の回転とは別）</td></tr>
         <tr><td>ホイール / ピンチ</td><td>ズーム</td></tr>
-        <tr><td><kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>キューブ操作の確定 / 取消・選択解除</td></tr>
-        <tr><td><kbd>U</kbd> / <kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>一手戻す</td></tr>
+        <tr><td><kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>キューブ操作の確定 / ①の取り消し・選択解除</td></tr>
         <tr><td><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> / <kbd>+</kbd><kbd>−</kbd></td><td>視点の回転 / ズーム</td></tr>
         <tr><td><kbd>1</kbd>〜<kbd>4</kbd></td><td>視点プリセット（斜め・正面・真上・側面）</td></tr>
         <tr><td><kbd>V</kbd> / <kbd>S</kbd> / <kbd>M</kbd> / <kbd>H</kbd></td><td>展開表示 / 刻印表示 / サウンド / ルール</td></tr>
