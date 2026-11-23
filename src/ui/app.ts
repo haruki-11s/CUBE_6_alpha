@@ -714,6 +714,23 @@ function checkEntries(): { line: Line; player: Player }[] {
   return checkLines(gs).map(line => ({ line, player: by }));
 }
 
+/**
+ * 詰み ends the game before the loser moves. A person who lost that way may still
+ * play that turn (「まだ負けてない」) to see for themselves that no cube move breaks the line.
+ */
+function canPlayOn(): boolean {
+  return gs.status === `win:${other(gs.current)}` && gs.winReason === 'mate'
+    && (match.mode !== 'cpu' || gs.current === match.human);
+}
+/** Only that turn can face the player to move with a line no cube move breaks (in normal play it would be over). */
+function playingOn(): boolean {
+  return gs.status === 'playing' && isMate(gs.board, other(gs.current));
+}
+/** Outcome hints: as set, and always on the turn played after 詰み, since that turn is for checking. */
+function hintsOn(): boolean {
+  return settings.showHints || playingOn();
+}
+
 function resultText(state: GameState): { title: string; reason: string; color: string } {
   if (state.status === 'win:O' || state.status === 'win:X') {
     const w: Player = state.status === 'win:O' ? 'O' : 'X';
@@ -764,12 +781,13 @@ function refresh(): void {
   controls.render({
     state: gs, phase, selectedFrom, canPlace: canPlaceNow(), step1Label: step1Label(), canUndo: canUndoNow(), log,
     resultText: gs.status !== 'playing' ? resultText(gs).title : undefined,
+    canPlayOn: canPlayOn(),
     names: { O: nameOf('O'), X: nameOf('X') },
     cpu: match.mode === 'cpu' ? { side: other(match.human), label: levelLabel(match.level), acting: cpuActing } : null,
     clock: clockFaces(),
     undoNote: gameClock() ? '持ち時間ありの対局では「待った」はできません' : undefined,
     check: checked
-      ? { by: other(gs.current), escapes: settings.showHints ? breakingMoves(gs.board, other(gs.current)).length : null }
+      ? { by: other(gs.current), escapes: hintsOn() ? breakingMoves(gs.board, other(gs.current)).length : null }
       : null,
   });
   controls.setBusy(locked());
@@ -814,7 +832,7 @@ function updatePreview(): void {
   if (candidate && move) {
     const res = resolveAfterCubeMove(gs, move);
     after = res.board;
-    if (settings.showHints) {
+    if (hintsOn()) {
       // the outcome text speaks to the mover, so it is only shown for your own moves
       if (!cpuActing) outcome = outcomeOf(res, gs.current, inCheck(gs));
       lines = completedLines(res.board).map(line => ({ line, player: res.board[line[0]] as Player }));
@@ -1113,6 +1131,36 @@ async function finishGame(): Promise<void> {
   showResult();
 }
 
+/**
+ * 「まだ負けてない」: the game goes on from the 詰み position with the mated player to move.
+ * That turn ends like any other: if the opponent's line is still on the board, it is lost.
+ */
+function playOn(): void {
+  if (!ui || busy || !canPlayOn()) return;
+  resultModal?.close();
+  resultModal = null;
+  if (recorded) { // the result is counted when that turn ends
+    recordResult(recorded.level, recorded.result, { undos: 0, undo: true });
+    recorded = null;
+  }
+  const next: GameState = { ...gs, status: 'playing' };
+  delete next.winReason;
+  gs = next;
+  const last = log[log.length - 1];
+  if (last?.result) {
+    const entry: LogEntry = { ...last };
+    delete entry.result;
+    log = [...log.slice(0, -1), entry];
+  }
+  phase = 'step1';
+  selectedFrom = null;
+  selectedMove = null;
+  clockOn();
+  refresh();
+  announceTurn();
+  tcStart();
+}
+
 function undo(): void {
   if (!ui) return;
   if (match.mode === 'cpu') { undoVsCpu(); return; }
@@ -1304,6 +1352,10 @@ function onControlEvent(e: ControlEvent): void {
       sound.click();
       showResult();
       break;
+    case 'playOn':
+      sound.click();
+      playOn();
+      break;
     case 'replay':
       sound.click();
       startGame();
@@ -1406,6 +1458,10 @@ function showResult(): void {
         <span>「${levelLabel(HIDDEN_LEVEL)}」に挑戦できるようになりました。CPU対戦の強さ選択から選べます。</span></div></div>`;
     }
   }
+  if (canPlayOn()) {
+    extra += `<div class="play-on"><p>24通りのどの操作でも、${nameOf(other(gs.current))}の列が盤上に残ります。納得できないときは、実際に指して確かめられます。</p>
+      <button type="button" class="btn ok" data-act="play-on">${icon('resume')}まだ負けてない</button></div>`;
+  }
   const body = `
     <div class="result" style="--rc:${r.color}">
       <div class="result-icon">${winner ? `<span class="rchip ${winner.toLowerCase()}">${PLAYER_COLORS[winner].glyph}</span>` : '<span class="rchip draw">＝</span>'}</div>
@@ -1435,6 +1491,7 @@ function showResult(): void {
     actions,
     onClose: () => { resultModal = null; },
   });
+  resultModal.el.querySelector('[data-act="play-on"]')?.addEventListener('click', () => { sound.click(); playOn(); });
   if (justUnlocked) {
     sound.secret(0.5);
     justUnlocked = false;

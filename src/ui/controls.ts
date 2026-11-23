@@ -20,6 +20,7 @@ export type ControlEvent =
   | { type: 'peekLast'; on: boolean }
   | { type: 'deselectPiece' }
   | { type: 'showResult' }
+  | { type: 'playOn' }
   | { type: 'replay' }
   | { type: 'title' };
 
@@ -33,6 +34,8 @@ export interface ControlsView {
   canUndo: boolean;
   log: LogEntry[];
   resultText?: string;
+  /** Lost to 詰み: the loser may still play its turn to check (「まだ負けてない」). */
+  canPlayOn?: boolean;
   /** Display names ("〇（青）" / "あなた" / "CPU"). */
   names: Readonly<Record<Player, string>>;
   /** CPU games: the CPU's side, its strength label and whether it is acting now. */
@@ -292,10 +295,12 @@ export class Controls {
     el.innerHTML = `<p class="lead">${v.resultText ?? '対局終了'}</p>
       <div class="col-btns">
         <button type="button" class="btn primary" data-act="result">${icon('trophy')}結果を表示</button>
+        ${v.canPlayOn ? `<button type="button" class="btn ok" data-act="play-on" title="この局面から自分の番を指して、列を崩せるか確かめる">${icon('resume')}まだ負けてない</button>` : ''}
         <button type="button" class="btn" data-act="replay">${icon('refresh')}もう一度</button>
         <button type="button" class="btn ghost" data-act="title">${icon('home')}タイトルへ</button>
       </div>`;
     el.querySelector('[data-act="result"]')?.addEventListener('click', () => this.emit({ type: 'showResult' }));
+    el.querySelector('[data-act="play-on"]')?.addEventListener('click', () => this.emit({ type: 'playOn' }));
     el.querySelector('[data-act="replay"]')?.addEventListener('click', () => this.emit({ type: 'replay' }));
     el.querySelector('[data-act="title"]')?.addEventListener('click', () => this.emit({ type: 'title' }));
     return el;
