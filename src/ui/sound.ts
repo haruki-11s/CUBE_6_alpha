@@ -1,40 +1,40 @@
 /**
- * Sound effects, synthesised at runtime with the Web Audio API
- * (no audio files → nothing to download, works offline). No BGM by design.
+ * Plays the sound effects made in sfx.ts (no audio files, works offline). No BGM by design.
+ *
+ * Each effect is rendered into a buffer the first time it is needed (the common ones in idle time
+ * right after the first tap or key press) and then played as is, through one shared room.
+ * Sounds that go with an animation are cut to its current speed setting (tween.ts).
  */
+import { getAnimSpeed } from './tween';
+import { renderSfx, roomImpulse, sfxKey, type SfxSpec, type Side } from './sfx';
 
-interface ToneOpts {
-  f: number;          // start frequency (Hz)
-  f2?: number;        // end frequency (exponential glide)
-  type?: OscillatorType;
-  at?: number;        // start offset (s)
-  dur: number;        // length (s)
-  gain?: number;
-  attack?: number;
-  detune?: number;    // cents
-  lp?: number;        // optional low-pass cutoff (Hz)
+type Ctx = BaseAudioContext;
+
+function liveContext(): Ctx | null {
+  const AC: typeof AudioContext | undefined =
+    window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  return AC ? new AC() : null;
 }
 
-interface NoiseOpts {
-  f: number;          // filter frequency
-  f2?: number;        // filter sweep target
-  type?: BiquadFilterType;
-  q?: number;
-  at?: number;
-  dur: number;
-  gain?: number;
-  attack?: number;
+/** In idle time when the browser offers it, else soon. */
+function later(f: () => void): void {
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(() => f(), { timeout: 400 });
+  else setTimeout(f, 16);
 }
 
-const C5 = 523.25, E5 = 659.25, G5 = 783.99, C6 = 1046.5;
-
-class SoundEngine {
-  private ctx: AudioContext | null = null;
+export class SoundEngine {
+  private ctx: Ctx | null = null;
+  /** an OfflineAudioContext (previews, measurements) needs no resume and has no user gesture */
+  private live = true;
   private master: GainNode | null = null;
-  private noiseBuf: AudioBuffer | null = null;
+  private room: ConvolverNode | null = null;
+  private readonly cache = new Map<string, { buf: AudioBuffer; wet: number }>();
   private enabled = true;
   private volume = 0.7;
   private lastHover = 0;
+
+  /** `makeContext` can supply another context, e.g. an OfflineAudioContext for rendering to a file. */
+  constructor(private readonly makeContext: () => Ctx | null = liveContext) {}
 
   configure(enabled: boolean, volume: number): void {
     this.enabled = enabled;
@@ -48,212 +48,145 @@ class SoundEngine {
   unlock(): void {
     try {
       if (!this.ctx) {
-        const AC: typeof AudioContext | undefined =
-          window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-        if (!AC) return;
-        this.ctx = new AC();
-        const comp = this.ctx.createDynamicsCompressor();
-        comp.threshold.value = -16;
-        comp.knee.value = 14;
-        comp.ratio.value = 4;
-        this.master = this.ctx.createGain();
+        const ctx = this.makeContext();
+        if (!ctx) return;
+        this.ctx = ctx;
+        this.live = !('startRendering' in ctx);
+        this.master = ctx.createGain();
         this.master.gain.value = this.enabled ? this.volume : 0;
-        this.master.connect(comp);
-        comp.connect(this.ctx.destination);
+        this.master.connect(ctx.destination);
+        const ir = roomImpulse(ctx.sampleRate);
+        const irBuf = ctx.createBuffer(2, ir.l.length, ctx.sampleRate);
+        irBuf.copyToChannel(ir.l, 0);
+        irBuf.copyToChannel(ir.r, 1);
+        this.room = ctx.createConvolver();
+        this.room.normalize = false;
+        this.room.buffer = irBuf;
+        this.room.connect(this.master);
+        if (this.live) this.warmUp();
       }
-      if (this.ctx.state === 'suspended') void this.ctx.resume();
+      if (this.live && this.ctx.state !== 'running') void (this.ctx as AudioContext).resume();
     } catch {
       /* audio unavailable: stay silent */
     }
   }
 
-  private ready(): AudioContext | null {
-    if (!this.enabled || !this.ctx || !this.master) return null;
-    if (this.ctx.state !== 'running') {
-      void this.ctx.resume();
+  private ready(): Ctx | null {
+    const ctx = this.ctx;
+    if (!this.enabled || !ctx || !this.master) return null;
+    if (this.live && ctx.state !== 'running') {
+      void (ctx as AudioContext).resume();
       return null;
     }
-    return this.ctx;
+    return ctx;
   }
 
-  private tone(o: ToneOpts): void {
-    const ctx = this.ready();
-    if (!ctx || !this.master) return;
-    const t0 = ctx.currentTime + (o.at ?? 0);
-    const osc = ctx.createOscillator();
-    osc.type = o.type ?? 'sine';
-    osc.frequency.setValueAtTime(o.f, t0);
-    if (o.f2 !== undefined) osc.frequency.exponentialRampToValueAtTime(Math.max(1, o.f2), t0 + o.dur);
-    if (o.detune) osc.detune.value = o.detune;
-    const g = ctx.createGain();
-    const peak = o.gain ?? 0.2;
-    g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(peak, t0 + (o.attack ?? 0.004));
-    g.gain.exponentialRampToValueAtTime(0.0001, t0 + o.dur);
-    if (o.lp) {
-      const f = ctx.createBiquadFilter();
-      f.type = 'lowpass';
-      f.frequency.value = o.lp;
-      osc.connect(f);
-      f.connect(g);
-    } else {
-      osc.connect(g);
+  private get(ctx: Ctx, spec: SfxSpec): { buf: AudioBuffer; wet: number } {
+    const key = sfxKey(spec);
+    let e = this.cache.get(key);
+    if (!e) {
+      const s = renderSfx(spec, ctx.sampleRate);
+      const buf = ctx.createBuffer(2, s.l.length, ctx.sampleRate);
+      buf.copyToChannel(s.l, 0);
+      buf.copyToChannel(s.r, 1);
+      e = { buf, wet: s.wet };
+      this.cache.set(key, e);
     }
-    g.connect(this.master);
-    osc.start(t0);
-    osc.stop(t0 + o.dur + 0.03);
+    return e;
   }
 
-  private noise(o: NoiseOpts): void {
+  /** Renders the sounds a game uses all the time, one per idle slot, so none waits on first use. */
+  private warmUp(): void {
+    const speed = getAnimSpeed();
+    const list: SfxSpec[] = [
+      { id: 'click' }, { id: 'hover' }, { id: 'open' }, { id: 'close' }, { id: 'select' }, { id: 'start' },
+      { id: 'place', side: 'O' }, { id: 'place', side: 'X' }, { id: 'preview' }, { id: 'confirm' },
+      { id: 'rotate', speed }, { id: 'slide', speed }, { id: 'move', speed },
+      { id: 'turn', side: 'O' }, { id: 'turn', side: 'X' }, { id: 'check' }, { id: 'deselect' }, { id: 'cancel' },
+      { id: 'invalid' }, { id: 'undo' }, { id: 'win' }, { id: 'lose' },
+    ];
+    const next = (): void => {
+      const s = list.shift();
+      if (!s || !this.ctx) return;
+      try { this.get(this.ctx, s); } catch { return; }
+      later(next);
+    };
+    later(next);
+  }
+
+  /** Plays an effect `at` seconds from now; `vary` detunes it at random by up to ± that fraction. */
+  private play(spec: SfxSpec, at = 0, vary = 0): void {
     const ctx = this.ready();
     if (!ctx || !this.master) return;
-    if (!this.noiseBuf) {
-      const len = ctx.sampleRate;
-      const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-      const d = buf.getChannelData(0);
-      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
-      this.noiseBuf = buf;
+    try {
+      const { buf, wet } = this.get(ctx, spec);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      if (vary) src.playbackRate.value = 1 + (Math.random() * 2 - 1) * vary;
+      src.connect(this.master);
+      if (wet > 0 && this.room) {
+        const send = ctx.createGain();
+        send.gain.value = wet;
+        src.connect(send);
+        send.connect(this.room);
+      }
+      src.start(ctx.currentTime + Math.max(0, at));
+    } catch {
+      /* a sound is never worth an error */
     }
-    const t0 = ctx.currentTime + (o.at ?? 0);
-    const src = ctx.createBufferSource();
-    src.buffer = this.noiseBuf;
-    src.loop = true;
-    const filt = ctx.createBiquadFilter();
-    filt.type = o.type ?? 'bandpass';
-    filt.Q.value = o.q ?? 1;
-    filt.frequency.setValueAtTime(o.f, t0);
-    if (o.f2 !== undefined) filt.frequency.exponentialRampToValueAtTime(Math.max(20, o.f2), t0 + o.dur);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.0001, t0);
-    g.gain.exponentialRampToValueAtTime(o.gain ?? 0.2, t0 + (o.attack ?? 0.005));
-    g.gain.exponentialRampToValueAtTime(0.0001, t0 + o.dur);
-    src.connect(filt);
-    filt.connect(g);
-    g.connect(this.master);
-    src.start(t0, Math.random() * 0.5);
-    src.stop(t0 + o.dur + 0.03);
   }
 
   // ── UI ────────────────────────────────────────────────────────────────
-  click(): void { this.tone({ f: 1500, f2: 1100, type: 'triangle', dur: 0.05, gain: 0.07 }); }
+  click(): void { this.play({ id: 'click' }, 0, 0.03); }
   hover(): void {
     const now = performance.now();
     if (now - this.lastHover < 45) return;
     this.lastHover = now;
-    this.tone({ f: 2300, dur: 0.03, gain: 0.022 });
+    this.play({ id: 'hover' }, 0, 0.04);
   }
-  toggle(on: boolean): void {
-    this.tone({ f: on ? 880 : 660, f2: on ? 1320 : 440, type: 'triangle', dur: 0.08, gain: 0.07 });
-  }
-  open(): void { this.noise({ type: 'bandpass', f: 700, f2: 1800, q: 1.2, dur: 0.16, gain: 0.05, attack: 0.03 }); }
-  close(): void { this.noise({ type: 'bandpass', f: 1600, f2: 600, q: 1.2, dur: 0.14, gain: 0.04, attack: 0.02 }); }
-  whoosh(): void { this.noise({ type: 'bandpass', f: 300, f2: 1500, q: 0.8, dur: 0.35, gain: 0.08, attack: 0.1 }); }
-  invalid(): void {
-    this.tone({ f: 150, type: 'square', dur: 0.13, gain: 0.04, lp: 900 });
-    this.tone({ f: 158, type: 'square', dur: 0.13, gain: 0.03, lp: 900 });
-  }
+  toggle(on: boolean): void { this.play({ id: 'toggle', on }); }
+  open(): void { this.play({ id: 'open' }); }
+  close(): void { this.play({ id: 'close' }); }
+  whoosh(): void { this.play({ id: 'whoosh' }); }
+  invalid(): void { this.play({ id: 'invalid' }); }
   // ── Clock ─────────────────────────────────────────────────────────────
   /** 秒読み countdown: a soft tick, or a sharper one for the last seconds. */
-  tick(urgent = false): void {
-    this.tone({ f: urgent ? 1760 : 1320, dur: urgent ? 0.07 : 0.05, gain: urgent ? 0.085 : 0.05, type: 'triangle' });
-  }
+  tick(urgent = false): void { this.play({ id: 'tick', urgent }); }
   /** Main time used up: from now on every turn is on 秒読み. */
-  byoyomi(): void {
-    this.tone({ f: 988, dur: 0.11, gain: 0.08, type: 'triangle' });
-    this.tone({ f: 988, at: 0.15, dur: 0.11, gain: 0.08, type: 'triangle' });
-    this.tone({ f: 1319, at: 0.3, dur: 0.2, gain: 0.07, type: 'triangle' });
-  }
-  start(): void {
-    [392, C5, E5, G5].forEach((f, i) => this.tone({ f, at: i * 0.07, dur: 0.3, gain: 0.07, type: 'triangle' }));
-  }
+  byoyomi(): void { this.play({ id: 'byoyomi' }); }
+  start(): void { this.play({ id: 'start' }); }
 
   // ── Board ─────────────────────────────────────────────────────────────
-  select(): void {
-    this.tone({ f: 880, dur: 0.12, gain: 0.09 });
-    this.tone({ f: 1320, at: 0.05, dur: 0.16, gain: 0.07 });
-  }
-  deselect(): void { this.tone({ f: 1100, f2: 700, dur: 0.1, gain: 0.06, type: 'triangle' }); }
-  place(player: 'O' | 'X'): void {
-    const k = player === 'O' ? 1 : 0.84;
-    this.tone({ f: 620 * k, f2: 210 * k, dur: 0.18, gain: 0.3 });
-    this.tone({ f: 1240 * k, f2: 900 * k, dur: 0.09, gain: 0.05, type: 'triangle' });
-    this.noise({ type: 'highpass', f: 3200, dur: 0.035, gain: 0.07 });
-    this.tone({ f: 2093 * k, at: 0.03, dur: 0.28, gain: 0.022 });
-  }
-  lift(): void { this.noise({ type: 'bandpass', f: 500, f2: 2400, q: 1.4, dur: 0.36, gain: 0.11, attack: 0.08 }); }
-  land(): void {
-    this.tone({ f: 320, f2: 110, dur: 0.14, gain: 0.26 });
-    this.noise({ type: 'lowpass', f: 900, dur: 0.07, gain: 0.11 });
-  }
-  preview(): void {
-    this.tone({ f: 740, dur: 0.06, gain: 0.055, type: 'triangle' });
-    this.tone({ f: 988, at: 0.045, dur: 0.08, gain: 0.045, type: 'triangle' });
-  }
-  confirm(): void {
-    this.tone({ f: 660, dur: 0.1, gain: 0.09, type: 'triangle' });
-    this.tone({ f: 990, at: 0.08, dur: 0.16, gain: 0.09, type: 'triangle' });
-  }
-  cancel(): void { this.tone({ f: 540, f2: 360, dur: 0.14, gain: 0.07, type: 'triangle' }); }
-  rotate(): void {
-    this.tone({ f: 85, f2: 150, type: 'sawtooth', dur: 0.5, gain: 0.05, lp: 700, attack: 0.05 });
-    [0, 0.11, 0.22, 0.33].forEach((t, k) =>
-      this.noise({ type: 'highpass', f: 2600 + k * 300, at: t, dur: 0.03, gain: 0.085 - k * 0.015 }));
-    this.tone({ f: 190, f2: 85, at: 0.48, dur: 0.14, gain: 0.24 });
-    this.noise({ type: 'lowpass', f: 700, at: 0.48, dur: 0.09, gain: 0.15 });
-  }
-  slide(): void {
-    this.noise({ type: 'bandpass', f: 1900, f2: 380, q: 0.9, dur: 0.52, gain: 0.15, attack: 0.06 });
-    this.tone({ f: 150, f2: 70, at: 0.48, dur: 0.18, gain: 0.24 });
-  }
-  turn(player: 'O' | 'X'): void {
-    const f = player === 'O' ? C6 : 880;
-    this.tone({ f, dur: 0.6, gain: 0.06 });
-    this.tone({ f: f * 2.01, dur: 0.3, gain: 0.02 });
-    this.tone({ f: f * 1.5, at: 0.09, dur: 0.5, gain: 0.035 });
-  }
-  /** 王手: a short two-note alarm. */
-  check(): void {
-    this.tone({ f: 988, dur: 0.12, gain: 0.08, type: 'square', lp: 2600 });
-    this.tone({ f: 1318.5, at: 0.13, dur: 0.22, gain: 0.08, type: 'square', lp: 2600 });
-    this.tone({ f: 659.25, at: 0.13, dur: 0.3, gain: 0.05, type: 'triangle' });
-  }
-  undo(): void {
-    this.tone({ f: 600, f2: 900, dur: 0.07, gain: 0.06, type: 'triangle' });
-    this.tone({ f: 900, f2: 520, at: 0.06, dur: 0.12, gain: 0.06, type: 'triangle' });
-  }
+  select(): void { this.play({ id: 'select' }, 0, 0.03); }
+  deselect(): void { this.play({ id: 'deselect' }, 0, 0.03); }
+  place(player: Side): void { this.play({ id: 'place', side: player }, 0, 0.02); }
+  /** A piece moving: its flight and its landing, in time with scene3d's animateMove. */
+  move(): void { this.play({ id: 'move', speed: getAnimSpeed() }); }
+  preview(): void { this.play({ id: 'preview' }, 0, 0.03); }
+  confirm(): void { this.play({ id: 'confirm' }); }
+  cancel(): void { this.play({ id: 'cancel' }); }
+  /** A layer turn: air while it turns, a click as it snaps in (animateRotate). */
+  rotate(): void { this.play({ id: 'rotate', speed: getAnimSpeed() }); }
+  /** A layer slide: air while it slides, a soft stop (animateSlide). */
+  slide(): void { this.play({ id: 'slide', speed: getAnimSpeed() }); }
+  turn(player: Side): void { this.play({ id: 'turn', side: player }); }
+  /** 王手 */
+  check(): void { this.play({ id: 'check' }); }
+  undo(): void { this.play({ id: 'undo' }); }
 
   // ── Results ───────────────────────────────────────────────────────────
-  win(offset = 0): void {
-    [C5, E5, G5, C6].forEach((f, i) => this.tone({ f, at: offset + i * 0.12, dur: 0.42, gain: 0.11, type: 'triangle' }));
-    [C5, E5, G5].forEach(f => this.tone({ f, at: offset + 0.5, dur: 1.4, gain: 0.05 }));
-    this.tone({ f: C6, at: offset + 0.5, dur: 1.4, gain: 0.045, type: 'triangle' });
-    this.noise({ type: 'highpass', f: 6000, at: offset + 0.5, dur: 0.9, gain: 0.035, attack: 0.2 });
-  }
-  /** Defeat against the CPU: a soft, falling minor phrase. */
-  lose(offset = 0): void {
-    [440, 349.23, 293.66].forEach((f, i) => this.tone({ f, at: offset + i * 0.2, dur: 0.5, gain: 0.08, type: 'triangle' }));
-    this.tone({ f: 220, at: offset + 0.62, dur: 1.3, gain: 0.07, type: 'triangle' });
-    this.tone({ f: 261.63, at: offset + 0.62, dur: 1.3, gain: 0.035 });
-  }
-  /** Boom, then the winner's fanfare — or `lose()` when the listener is the one who lost. */
+  win(offset = 0): void { this.play({ id: 'win' }, offset); }
+  /** Defeat against the CPU: short and muted. */
+  lose(offset = 0): void { this.play({ id: 'lose' }, offset); }
+  /** A muffled hit, then the winner's sound, or `lose()` when the listener is the one who lost. */
   selfDestruct(listenerWins = true): void {
-    this.noise({ type: 'lowpass', f: 1600, f2: 90, dur: 0.75, gain: 0.3 });
-    this.tone({ f: 110, f2: 40, dur: 0.6, gain: 0.28 });
+    this.play({ id: 'boom' });
     if (listenerWins) this.win(0.55);
     else this.lose(0.55);
   }
-  /** Hidden level unlocked: a sparkling rise. */
-  secret(offset = 0): void {
-    [C5, E5, G5, C6, 1318.5, 1568].forEach((f, i) =>
-      this.tone({ f, at: offset + i * 0.075, dur: 0.5, gain: 0.07, type: 'triangle' }));
-    this.tone({ f: 2093, at: offset + 0.5, dur: 1.4, gain: 0.04 });
-    this.noise({ type: 'highpass', f: 7000, at: offset + 0.45, dur: 1.2, gain: 0.05, attack: 0.3 });
-  }
-  draw(): void {
-    this.tone({ f: C5, dur: 0.7, gain: 0.07, type: 'triangle' });
-    this.tone({ f: E5, at: 0.14, dur: 0.7, gain: 0.06, type: 'triangle' });
-    this.tone({ f: 587.33, at: 0.4, dur: 1.0, gain: 0.06 });
-  }
+  /** Hidden level unlocked. */
+  secret(offset = 0): void { this.play({ id: 'secret' }, offset); }
+  draw(): void { this.play({ id: 'draw' }); }
 }
 
 export const sound = new SoundEngine();

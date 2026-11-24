@@ -1162,13 +1162,12 @@ async function doMove(from: number, to: number): Promise<void> {
   const mark = gs.current;
   pushHistory();
   setBusy(true);
-  sound.lift();
+  sound.move(); // its landing is timed to the animation's touchdown
   const next = applyStep1Move(gs, from, to);
   log = [...log, { ply: gs.ply + 1, player: mark, step1: { kind: 'move', from, to }, cube: null }];
   u.scene.setSelected(null);
   await u.scene.animateMove(from, to, mark).catch(() => undefined);
   if (ui !== u) return;
-  sound.land();
   gs = next;
   lastMoved = to;
   selectedFrom = null;
