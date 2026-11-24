@@ -1162,7 +1162,7 @@ async function doMove(from: number, to: number): Promise<void> {
   const mark = gs.current;
   pushHistory();
   setBusy(true);
-  sound.move(); // its landing is timed to the animation's touchdown
+  sound.move(mark); // it lands with the place sound, timed to the animation's touchdown
   const next = applyStep1Move(gs, from, to);
   log = [...log, { ply: gs.ply + 1, player: mark, step1: { kind: 'move', from, to }, cube: null }];
   u.scene.setSelected(null);

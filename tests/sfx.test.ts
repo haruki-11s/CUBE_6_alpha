@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ALL_SFX, ANIM, ROTATE_LATCH, SLIDE_SETTLE, arch, cubicSpeed, renderSfx, roomImpulse, sfxKey,
+  ALL_SFX, ANIM, ROTATE_LATCH, SLIDE_SETTLE, arch, cubicSpeed, moveLanding, renderSfx, roomImpulse, sfxKey,
   type SfxSpec, type Stereo,
 } from '../src/ui/sfx';
 
@@ -65,7 +65,6 @@ describe('sound effects', () => {
   it.each([0.55, 1, 1.5])('hits land with the animation at speed ×%s', speed => {
     // each sound's touch starts at the animation's contact point: quiet just before, a sharp attack right there
     const cases: [SfxSpec, number][] = [
-      [{ id: 'move', speed }, ANIM.moveFlight / 1000 * speed],
       [{ id: 'rotate', speed }, ROTATE_LATCH * ANIM.rotate / 1000 * speed],
       [{ id: 'slide', speed }, SLIDE_SETTLE * ANIM.slide / 1000 * speed],
     ];
@@ -85,13 +84,55 @@ describe('sound effects', () => {
     }
   });
 
-  it('keeps the quiet sounds quiet and the main touch the loudest of the frequent ones', () => {
+  it.each([0.55, 1, 1.5])('a moving piece flies on air and lands with the place sound at speed ×%s', speed => {
+    // sound.ts plays the place sound at moveLanding(): the flight must be done by then, and the
+    // place sound must hit at once
+    const t = moveLanding(speed);
+    expect(t).toBeCloseTo(ANIM.moveFlight / 1000 * speed, 6);
+    const flight = renderSfx({ id: 'move', speed }, SR);
+    const { peak, at } = peakOf(flight);
+    expect(at).toBeGreaterThan(0.25 * t); // loudest in mid-flight
+    expect(at).toBeLessThan(0.75 * t);
+    let tail = 0;
+    for (let i = Math.round((t - 0.01) * SR); i < flight.l.length; i++) {
+      tail = Math.max(tail, Math.abs(flight.l[i]), Math.abs(flight.r[i]));
+    }
+    expect(tail).toBeLessThan(0.05 * peak);
+    for (const side of ['O', 'X'] as const) expect(peakOf(renderSfx({ id: 'place', side }, SR)).at, side).toBeLessThan(0.003);
+  });
+
+  it('keeps the quiet sounds quiet, and a placed piece in line with the other board sounds', () => {
     const level = (s: SfxSpec): number => loudest(renderSfx(s, SR));
-    const hover = level({ id: 'hover' }), click = level({ id: 'click' }), place = level({ id: 'place', side: 'O' });
+    const hover = level({ id: 'hover' }), click = level({ id: 'click' });
+    const confirm = level({ id: 'confirm' }), check = level({ id: 'check' });
     expect(hover).toBeLessThan(click / 2);
-    expect(click).toBeLessThan(place / 2);
-    for (const s of [{ id: 'turn', side: 'O' }, { id: 'select' }, { id: 'confirm' }, { id: 'rotate', speed: 1 }] as SfxSpec[]) {
-      expect(level(s), sfxKey(s)).toBeLessThan(place);
+    for (const side of ['O', 'X'] as const) {
+      const place = level({ id: 'place', side });
+      expect(click, side).toBeLessThan(place / 2);
+      for (const s of [{ id: 'turn', side: 'O' }, { id: 'select' }, { id: 'confirm' }] as SfxSpec[]) {
+        expect(level(s), `${sfxKey(s)} vs place:${side}`).toBeLessThan(place);
+      }
+      // the main touch, but quieter than 王手 and within 6 dB of a confirm
+      expect(place, side).toBeLessThan(check);
+      expect(place, side).toBeLessThan(2 * confirm);
+    }
+  });
+
+  it('sets a piece down with a short, dry knock: nothing left booming', () => {
+    for (const side of ['O', 'X'] as const) {
+      const { l, r } = renderSfx({ id: 'place', side }, SR);
+      // 2 ms RMS: from its loudest point, the sound is 30 dB down within 60 ms
+      const w = Math.round(0.002 * SR), lv: number[] = [];
+      let acc = 0, best = 0, at = 0;
+      for (let i = 0; i < l.length; i++) {
+        acc += (l[i] * l[i] + r[i] * r[i]) / 2;
+        if (i >= w) acc -= (l[i - w] * l[i - w] + r[i - w] * r[i - w]) / 2;
+        lv.push(acc / w);
+        if (acc / w > best) { best = acc / w; at = i; }
+      }
+      let end = at;
+      while (end < lv.length && lv[end] >= best / 1000) end++;
+      expect((end - at) / SR, side).toBeLessThan(0.06);
     }
   });
 

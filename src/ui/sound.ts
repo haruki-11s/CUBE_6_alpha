@@ -6,7 +6,7 @@
  * Sounds that go with an animation are cut to its current speed setting (tween.ts).
  */
 import { getAnimSpeed } from './tween';
-import { renderSfx, roomImpulse, sfxKey, type SfxSpec, type Side } from './sfx';
+import { moveLanding, renderSfx, roomImpulse, sfxKey, type SfxSpec, type Side } from './sfx';
 
 type Ctx = BaseAudioContext;
 
@@ -160,8 +160,12 @@ export class SoundEngine {
   select(): void { this.play({ id: 'select' }, 0, 0.03); }
   deselect(): void { this.play({ id: 'deselect' }, 0, 0.03); }
   place(player: Side): void { this.play({ id: 'place', side: player }, 0, 0.02); }
-  /** A piece moving: its flight and its landing, in time with scene3d's animateMove. */
-  move(): void { this.play({ id: 'move', speed: getAnimSpeed() }); }
+  /** A piece moving: its flight, then the place sound as it touches down (scene3d's animateMove). */
+  move(player: Side): void {
+    const speed = getAnimSpeed();
+    this.play({ id: 'move', speed });
+    this.play({ id: 'place', side: player }, moveLanding(speed), 0.02);
+  }
   preview(): void { this.play({ id: 'preview' }, 0, 0.03); }
   confirm(): void { this.play({ id: 'confirm' }); }
   cancel(): void { this.play({ id: 'cancel' }); }
