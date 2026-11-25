@@ -1,4 +1,5 @@
-// "How to play" content with small SVG diagrams.
+// "How to play" content with small SVG diagrams (text from the dictionaries).
+import { t } from './i18n';
 
 type P3 = [number, number, number];
 // Cabinet projection: unlike a true isometric view, no two lattice points overlap.
@@ -25,7 +26,7 @@ function svgLines(): string {
     return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="3.2" stroke-linecap="round"/>`
       + [[x1, y1], [mx, my], [x2, y2]].map(([cx, cy]) => `<circle cx="${cx}" cy="${cy}" r="5" fill="${color}"/>`).join('');
   };
-  return `<svg class="dia" viewBox="-42 -72 116 106" role="img" aria-label="ラインの例">
+  return `<svg class="dia" viewBox="-42 -72 116 106" role="img" aria-label="${t().rules.linesAria}">
     ${edges.join('')}${dots.join('')}
     ${line([0, 0, 2], [2, 0, 2], '#3d8bff')}
     ${line([0, 0, 0], [2, 2, 0], '#ff3b5c')}
@@ -47,7 +48,7 @@ function grid3(cx: number, cy: number, step: number, marks: string[], color: str
 function svgRotate(): string {
   const before = ['o', '', '', '', 'x', '', '', '', ''];
   const after = ['', '', '', '', 'x', '', 'o', '', ''];
-  return `<svg class="dia" viewBox="0 0 230 110" role="img" aria-label="回転の例">
+  return `<svg class="dia" viewBox="0 0 230 110" role="img" aria-label="${t().rules.rotateAria}">
     <defs><marker id="rr-ah" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ffc233"/></marker></defs>
     <rect x="18" y="23" width="64" height="64" rx="8" fill="rgba(255,194,51,.07)" stroke="#ffc233" stroke-opacity=".55"/>
     ${grid3(50, 55, 21, before, '#ffc233')}
@@ -55,8 +56,8 @@ function svgRotate(): string {
     <rect x="148" y="23" width="64" height="64" rx="8" fill="rgba(255,194,51,.07)" stroke="#ffc233" stroke-opacity=".55"/>
     ${grid3(180, 55, 21, after, '#ffc233')}
     <path d="M 214 34 A 40 40 0 0 0 146 34" fill="none" stroke="#ffc233" stroke-width="2.4" marker-end="url(#rr-ah)"/>
-    <text x="180" y="104" fill="#ffc233" font-size="10" text-anchor="middle">↺ 左回りに90°</text>
-    <text x="50" y="104" fill="#8a93c4" font-size="10" text-anchor="middle">上から見た層</text>
+    <text x="180" y="104" fill="#ffc233" font-size="10" text-anchor="middle">${t().rules.rotateDia}</text>
+    <text x="50" y="104" fill="#8a93c4" font-size="10" text-anchor="middle">${t().rules.rotateDiaFrom}</text>
   </svg>`;
 }
 
@@ -64,73 +65,67 @@ function svgSlide(): string {
   const cell = (x: number, m: string, dim = false): string =>
     `<rect x="${x - 14}" y="36" width="28" height="28" rx="6" fill="#141a36" stroke="#2ee59d" stroke-opacity="${dim ? 0.25 : 0.55}"/>`
     + (m ? `<circle cx="${x}" cy="50" r="8" fill="${m === 'o' ? '#3d8bff' : '#ff3b5c'}"/>` : '');
-  return `<svg class="dia" viewBox="0 0 230 110" role="img" aria-label="繰越の例">
+  return `<svg class="dia" viewBox="0 0 230 110" role="img" aria-label="${t().rules.slideAria}">
     <defs><marker id="sl-ah" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2ee59d"/></marker></defs>
     ${cell(22, 'o')}${cell(52, 'x')}${cell(82, '')}
     <path d="M 100 50 L 126 50" stroke="#8a93c4" stroke-width="2" marker-end="url(#sl-ah)"/>
     ${cell(148, 'x')}${cell(178, '')}${cell(208, 'o')}
     <path d="M 148 32 C 148 8, 208 8, 208 30" fill="none" stroke="#2ee59d" stroke-width="2.2" stroke-dasharray="4 3" marker-end="url(#sl-ah)" opacity=".9"/>
-    <text x="178" y="86" fill="#2ee59d" font-size="10" text-anchor="middle">−方向へ1マス</text>
-    <text x="178" y="100" fill="#8a93c4" font-size="9.5" text-anchor="middle">はみ出した駒は反対側へ</text>
+    <text x="178" y="86" fill="#2ee59d" font-size="10" text-anchor="middle">${t().rules.slideDia}</text>
+    <text x="178" y="100" fill="#8a93c4" font-size="9.5" text-anchor="middle">${t().rules.slideDiaWrap}</text>
   </svg>`;
 }
 
 export function rulesHTML(): string {
+  const R = t().rules;
+  const ids = ['r-goal', 'r-flow', 'r-ops', 'r-win', 'r-cpu', 'r-keys'];
+  const nav = R.nav.map((label, i) => `<button type="button" data-to="${ids[i]}">${label}</button>`).join('');
+  const keys = R.keyRows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
   return `
   <div class="rules">
-    <nav class="rules-nav" aria-label="目次">
-      <button type="button" data-to="r-goal">目的</button><button type="button" data-to="r-flow">手番の流れ</button><button type="button" data-to="r-ops">キューブ操作</button><button type="button" data-to="r-win">勝敗</button><button type="button" data-to="r-cpu">CPU対戦</button><button type="button" data-to="r-keys">操作方法</button>
-    </nav>
+    <nav class="rules-nav" aria-label="${R.navAria}">${nav}</nav>
     <section id="r-goal">
-      <h3><span class="rn">1</span>目的</h3>
+      <h3><span class="rn">1</span>${R.goal}</h3>
       <div class="rule-split">
-        <p>3×3×3 の立体盤で、自分の駒を<b>一直線に3つ</b>並べたら勝ち。縦・横・面の斜め・<b>立体対角線</b>を合わせて <b>49本</b> のラインがあります。</p>
-        <figure>${svgLines()}<figcaption><span style="color:#3d8bff">■</span>直線 <span style="color:#ff3b5c">■</span>面の斜め <span style="color:#b47cff">■</span>立体対角線</figcaption></figure>
+        <p>${R.goalText}</p>
+        <figure>${svgLines()}<figcaption><span style="color:#3d8bff">■</span>${R.lineStraight} <span style="color:#ff3b5c">■</span>${R.lineFace} <span style="color:#b47cff">■</span>${R.lineSpace}</figcaption></figure>
       </div>
     </section>
     <section id="r-flow">
-      <h3><span class="rn">2</span>手番の流れ</h3>
+      <h3><span class="rn">2</span>${R.flow}</h3>
       <ol class="flow">
-        <li><b>① 配置 / 移動</b>手駒（各6個）があるうちは空きマスに<b>配置</b>。6個すべて置いたら、自分の駒を1つ好きな空きマスへ<b>移動</b>します。</li>
-        <li><b>② キューブ操作（必須）</b>「回転」か「繰越」を必ず1回行います。24通りの操作はいつでもすべて選べます。パスはできません。「確定」する前なら、<b>「取消」</b>で①の配置／移動をやり直せます。</li>
+        <li><b>${R.flowStep1}</b>${R.flowStep1Text}</li>
+        <li><b>${R.flowStep2}</b>${R.flowStep2Text}</li>
       </ol>
     </section>
     <section id="r-ops">
-      <h3><span class="rn">3</span>キューブ操作</h3>
+      <h3><span class="rn">3</span>${R.ops}</h3>
       <div class="dia-row">
-        <figure>${svgRotate()}<figcaption><b>回転</b>：X・Y・Z いずれかの軸の<b>層（0〜2）</b>を90°回します。↺／↻ は<b>その軸の＋側から見た</b>向きです。</figcaption></figure>
-        <figure>${svgSlide()}<figcaption><b>繰越（スライド）</b>：盤全体を軸方向に1マスずらします。はみ出した列は反対側へ回り込みます。</figcaption></figure>
+        <figure>${svgRotate()}<figcaption>${R.rotateText}</figcaption></figure>
+        <figure>${svgSlide()}<figcaption>${R.slideText}</figcaption></figure>
       </div>
-      <p class="note">操作を選ぶと、3D表示に<b>対象の層（色付きの枠）</b>と<b>駒の動き（半透明の予告）</b>、見取り図に<b>操作後の配置</b>が表示されます。軸の色：<b class="ax-x">X＝緑</b>・<b class="ax-y">Y＝黄</b>・<b class="ax-z">Z＝紫</b></p>
+      <p class="note">${R.opsNote}</p>
     </section>
     <section id="r-win">
-      <h3><span class="rn">4</span>勝敗（王手ルール）</h3>
-      <p class="lead-p">列は<b>②まで終えた時点</b>で判定します。①で揃えただけでは、まだ勝ちではありません。</p>
+      <h3><span class="rn">4</span>${R.win}</h3>
+      <p class="lead-p">${R.winLead}</p>
       <ul class="cards3">
-        <li class="c-check"><b>王手</b>自分の番を終えた時点で自分の列が揃っていたら「王手」。相手は次の番の②で、その列を崩さなければなりません。</li>
-        <li class="c-win"><b>勝ち</b>相手が王手を崩せずに番を終えたら勝ち。どの操作でも崩せない列を作れば<b>詰み</b>で、その場で勝ちです。</li>
-        <li class="c-lose"><b>負け</b>自分の番を終えた時点で相手の列が盤上にあると負け（王手を崩せなかった／自分の操作で相手の列を揃えた）。</li>
+        <li class="c-check"><b>${R.cardCheck}</b>${R.cardCheckText}</li>
+        <li class="c-win"><b>${R.cardWin}</b>${R.cardWinText}</li>
+        <li class="c-lose"><b>${R.cardLose}</b>${R.cardLoseText}</li>
       </ul>
-      <p class="note">盤の中心を通る<b>縦・横・奥の3本</b>の列は、どの操作でも崩れません（揃えば詰み）。手数上限（設定）に達すると引き分けです。</p>
-      <p class="note">詰みで負けたときは、結果と一緒に出る<b>「盤面を確認する」</b>で、24通りの操作それぞれのあとの盤面を確かめられます。誤審だと思うときは、そこで<b>「誤審の訂正」</b>を押すと、その局面から自分の番を指して対局を続けられます（崩せなければ、その番を終えた時点で負け）。</p>
+      <p class="note">${R.winNote}</p>
+      <p class="note">${R.mateNote}</p>
     </section>
     <section id="r-cpu">
-      <h3><span class="rn">5</span>CPU対戦</h3>
-      <p>強さは <b>Lv.1</b>〜<b>Lv.5</b> の5段階。対戦前に強さと先手・後手を選べます。あなたは <b style="color:#9cc6ff">〇（青）</b> です。結果画面の<b>「次のレベル」</b>で、ひとつ上の強さにそのまま挑戦できます。</p>
-      <p><b>持ち時間</b>：お互いに3分。使い切ると1手ごとに<b>秒読み</b>（10秒 または 30秒）になり、時間内に②の確定まで終えられないと<b>時間切れ負け</b>です。アプリを閉じたり切り替えたりしている間は時計が止まります。</p>
-      <p class="note">CPU の手番では、置く場所と<b>選んだキューブ操作</b>が3Dと見取り図に表示されてから実行されます。</p>
+      <h3><span class="rn">5</span>${R.cpu}</h3>
+      <p>${R.cpuText}</p>
+      <p>${R.cpuClock}</p>
+      <p class="note">${R.cpuNote}</p>
     </section>
     <section id="r-keys">
-      <h3><span class="rn">6</span>操作方法</h3>
-      <table class="keys">
-        <tr><td>クリック / タップ</td><td>マスを選択（3D・見取り図のどちらでも可）</td></tr>
-        <tr><td>ドラッグ</td><td>視点を回転（盤の回転とは別）</td></tr>
-        <tr><td>ホイール / ピンチ</td><td>ズーム</td></tr>
-        <tr><td><kbd>Enter</kbd> / <kbd>Esc</kbd></td><td>キューブ操作の確定 / ①の取り消し・選択解除</td></tr>
-        <tr><td><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> / <kbd>+</kbd><kbd>−</kbd></td><td>視点の回転 / ズーム</td></tr>
-        <tr><td><kbd>1</kbd>〜<kbd>4</kbd></td><td>視点プリセット（斜め・正面・真上・側面）</td></tr>
-        <tr><td><kbd>V</kbd> / <kbd>S</kbd> / <kbd>M</kbd> / <kbd>H</kbd></td><td>展開表示 / 刻印表示 / サウンド / ルール</td></tr>
-      </table>
+      <h3><span class="rn">6</span>${R.keys}</h3>
+      <table class="keys">${keys}</table>
     </section>
   </div>`;
 }

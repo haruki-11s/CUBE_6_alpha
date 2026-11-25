@@ -192,6 +192,38 @@ kbd {
   position: absolute; left: 0; right: 0; bottom: 14px; z-index: 1; text-align: center;
   font-size: .72rem; color: var(--text-3); letter-spacing: .12em; animation: fadeIn 1s .8s both;
 }
+/* language button in the top-left corner (the same look as ≡) */
+.title-lang { position: absolute; top: 16px; left: 16px; z-index: 3; }
+.corner-toggle.lang-toggle { width: auto; padding: 0 15px 0 13px; gap: .5rem; display: inline-flex; align-items: center; font-size: .9rem; letter-spacing: .04em; }
+.corner-toggle.lang-toggle .ico { width: 20px; height: 20px; color: var(--accent); }
+.corner-menu.lang-menu { left: 0; right: auto; min-width: 180px; }
+.lang-menu button[aria-checked="true"] { color: var(--accent); }
+.lang-menu button .ico { width: 16px; height: 16px; }
+/* inside ローカル / インターネット: a heading, the two choices, and 戻る */
+.menu-head {
+  display: flex; align-items: center; gap: .6rem; padding: 0 .3rem .1rem; color: var(--text-2);
+  font-size: .9rem; font-weight: 700; letter-spacing: .14em; animation: fadeUp .6s var(--ease-out) both;
+}
+.menu-head small { font-family: var(--font-display); font-size: .58rem; font-weight: 500; letter-spacing: .2em; color: var(--text-3); }
+.menu-head::after { content: ""; flex: 1; height: 1px; background: linear-gradient(90deg, var(--line-2), transparent); }
+.menu-back {
+  align-self: center; display: inline-flex; align-items: center; gap: .35rem; margin-top: .2rem;
+  padding: .45rem 1.1rem .45rem .8rem; border-radius: 999px; border: 1px solid var(--line-2);
+  background: rgba(12, 15, 32, .5); color: var(--text-2); font-size: .86rem; letter-spacing: .06em;
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  transition: border-color .2s, color .2s, background .2s; animation: fadeUp .6s var(--ease-out) both;
+}
+.menu-back .ico { width: 16px; height: 16px; }
+.menu-back:hover { border-color: var(--accent); color: var(--text); background: rgba(122, 168, 255, .12); }
+/* moving between the lists, or after a language change: a quick fade, no intro */
+.menu.quick > * { animation: fadeUp .32s var(--ease-out) both; animation-delay: 0s; }
+.menu.quick > :nth-child(2) { animation-delay: .04s; }
+.menu.quick > :nth-child(3) { animation-delay: .08s; }
+.menu.quick > :nth-child(4) { animation-delay: .12s; }
+.menu.quick > :nth-child(5) { animation-delay: .16s; }
+.title.settled .logo, .title.settled .subtitle, .title.settled .corner-toggle, .title.settled .title-foot { animation: none; }
+/* English: the subtitle is longer, so it is set in capitals with less spacing */
+html[lang="en"] .subtitle { letter-spacing: .24em; text-indent: .24em; text-transform: uppercase; font-size: clamp(.74rem, 2.1vw, .95rem); }
 
 /* ═══════════════════════════════ Game layout ══════════════════════════ */
 .game {
@@ -429,7 +461,12 @@ kbd {
 .outcome.draw { color: var(--warn); background: rgba(255, 204, 77, .1); border: 1px solid rgba(255, 204, 77, .4); }
 .outcome.check { color: var(--check); background: var(--check-a); border: 1px solid var(--check-b); }
 .outcome.escape { color: var(--accent); background: var(--accent-a); border: 1px solid rgba(122, 168, 255, .45); }
-.confirm-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
+.confirm-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+/* English labels are longer: in the narrow side panel, Confirm / Undo drop their key hints */
+.confirm-card { container-type: inline-size; }
+@container (max-width: 330px) {
+  html[lang="en"] .confirm-row .btn kbd { display: none; }
+}
 
 .result-card .col-btns, .col-btns { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .result-lead { font-family: var(--font-display); font-weight: 900; font-size: 1.1rem; letter-spacing: .14em; text-align: center; color: #ffe08a; }
@@ -508,6 +545,7 @@ kbd {
 .rule-split { display: grid; grid-template-columns: 1fr 190px; gap: 14px; align-items: center; }
 .rules figure { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .rules figcaption { font-size: .78rem; color: var(--text-3); text-align: center; }
+.rules figcaption > span[style] { margin: 0 .15em 0 .3em; }
 .dia { width: 100%; max-width: 260px; height: auto; }
 .dia-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .dia-row figure { padding: 10px; border-radius: 12px; background: rgba(255, 255, 255, .025); border: 1px solid var(--line); }
@@ -707,6 +745,9 @@ select { background: #161b38; border: 1px solid var(--line-2); border-radius: 8p
   .hud-sub { display: none; }
   .top-actions { margin-left: auto; }
   .title-corner { top: 10px; right: 10px; }
+  .title-lang { top: 10px; left: 10px; }
+  /* the page scrolls here, so 100% has no height to fill: centre within the screen, clear of the corner buttons */
+  .title-ui { min-height: 100vh; min-height: 100dvh; padding: 72px 1.25rem 3.2rem; gap: 2rem; }
   .settings { grid-template-columns: 1fr; grid-template-areas: "sound" "disp" "rules"; }
   .rules-nav { top: -18px; }
   .icon-btn { width: 34px; height: 34px; }

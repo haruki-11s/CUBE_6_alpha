@@ -27,6 +27,8 @@ describe('持ち時間', () => {
     expect(turnTime(r, 0, 10_000).phase).toBe('out');
     expect(presetLabel('3m10s')).toBe('3分＋秒読み10秒');
     expect(presetLabel('off')).toBe('なし');
+    expect(presetLabel('3m10s', 'en')).toBe('3 min + 10 s');
+    expect(presetLabel('off', 'en')).toBe('None');
   });
 
   it('formats whole seconds rounded up', () => {

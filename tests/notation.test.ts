@@ -30,5 +30,14 @@ describe('notation', () => {
 
   it('layerHint', () => {
     expect(layerHint('Y', 0)).toBe('下層');
+    expect(layerHint('Y', 0, 'en')).toBe('bottom');
+  });
+
+  it('describes moves in English', () => {
+    expect(describeMove({ kind: 'rotate', axis: 'Y', layer: 2, dir: 'CW' }, 'en')).toBe('Rotate Y layer 2 (top) ↻ clockwise');
+    expect(describeMove({ kind: 'rotate', axis: 'X', layer: 0, dir: 'CCW' }, 'en')).toBe('Rotate X layer 0 (x=0 side) ↺ counterclockwise');
+    expect(describeMove({ kind: 'slide', axis: 'Z', dir: 'backward' }, 'en')).toBe('Slide along Z, one cell in the + direction');
+    expect(describeStep1({ kind: 'place', index: 0 }, 'en')).toBe('Place (0,0,0)');
+    expect(describeStep1({ kind: 'move', from: 0, to: 26 }, 'en')).toBe('Move (0,0,0)→(2,2,2)');
   });
 });

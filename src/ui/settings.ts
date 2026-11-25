@@ -1,5 +1,6 @@
 import type { CpuLevel } from '../core/ai';
 import type { ClockPreset } from '../core/clock';
+import { detectLang, isLang, type Lang } from './i18n';
 
 export type AnimSpeed = 'slow' | 'normal' | 'fast';
 export type FirstPlayer = 'O' | 'X' | 'random';
@@ -18,6 +19,7 @@ export interface Settings {
   cpuLevel: CpuLevel;      // last chosen CPU strength
   cpuOrder: CpuOrder;
   cpuClock: ClockPreset;   // CPU games: 持ち時間
+  lang: Lang;              // display language (chosen on the title screen)
 }
 
 export const SPEED_MULT: Readonly<Record<AnimSpeed, number>> = { slow: 1.5, normal: 1, fast: 0.55 };
@@ -42,6 +44,7 @@ export function defaultSettings(): Settings {
     cpuLevel: 1,
     cpuOrder: 'human',
     cpuClock: '3m30s',
+    lang: detectLang(),
   };
 }
 
@@ -68,6 +71,7 @@ export function loadSettings(): Settings {
         ? (v.cpuLevel as CpuLevel) : d.cpuLevel,
       cpuOrder: v.cpuOrder === 'human' || v.cpuOrder === 'cpu' || v.cpuOrder === 'random' ? v.cpuOrder : d.cpuOrder,
       cpuClock: v.cpuClock === 'off' || v.cpuClock === '3m10s' || v.cpuClock === '3m30s' ? v.cpuClock : d.cpuClock,
+      lang: isLang(v.lang) ? v.lang : d.lang,
     };
   } catch {
     return d;

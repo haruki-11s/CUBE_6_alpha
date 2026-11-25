@@ -1,5 +1,6 @@
 import { sound } from './sound';
 import { icon } from './icons';
+import { t } from './i18n';
 
 export interface ModalAction {
   label: string;
@@ -11,7 +12,7 @@ export interface ModalAction {
 
 export interface ModalOptions {
   title?: string;
-  /** Small English label after the title ("SETTINGS"), as on the title menu. */
+  /** Small English label after the title ("SETTINGS"), as on the title menu; empty = none. */
   subtitle?: string;
   content: string | HTMLElement;
   actions?: ModalAction[];
@@ -64,7 +65,7 @@ export function openModal(o: ModalOptions): ModalHandle {
     const x = document.createElement('button');
     x.type = 'button';
     x.className = 'modal-x';
-    x.setAttribute('aria-label', '閉じる');
+    x.setAttribute('aria-label', t().modal.close);
     x.innerHTML = icon('close');
     x.addEventListener('click', () => close());
     dlg.appendChild(x);

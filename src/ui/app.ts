@@ -23,8 +23,9 @@ import {
 } from './settings';
 import { setAnimSpeed, wait } from './tween';
 import { openModal, isModalOpen, type ModalAction, type ModalHandle } from './modal';
-import { icon } from './icons';
+import { icon, type IconName } from './icons';
 import { rulesHTML } from './rules';
+import { getLang, isLang, LANGS, setLang, t, type Lang } from './i18n';
 import { APP_VERSION, PLAYER_COLORS, other } from './theme';
 import { CpuClient } from './cpu';
 import {
@@ -77,8 +78,8 @@ let justUnlocked = false;
 let lastBusyToast = 0;
 /** 「盤面を確認する」: after 詰み the final board is open for previewing cube moves. */
 let reviewing = false;
-/** Removes the title screen's document listeners (corner menu). */
-let titleCleanup: (() => void) | null = null;
+/** Removes the title screen's document listeners (its two menus and Esc). */
+let titleUiCleanup: (() => void) | null = null;
 
 let elapsed = 0;
 let clockStart = 0;
@@ -176,9 +177,9 @@ function clockFaces(): Record<Player, ClockFace> | null {
   const used = tcUsed(c);
   const face = (p: Player): ClockFace => {
     const active = gs.status === 'playing' && gs.current === p;
-    const t = turnTime(c, c.left[p], active ? used : 0);
-    if (t.phase === 'main') return { text: fmtClock(t.ms), state: !active ? 'idle' : t.ms <= 30_000 ? 'low' : 'run' };
-    return { text: `秒読み ${Math.ceil(t.ms / 1000)}`, state: active ? 'byo' : 'idle' };
+    const tt = turnTime(c, c.left[p], active ? used : 0);
+    if (tt.phase === 'main') return { text: fmtClock(tt.ms), state: !active ? 'idle' : tt.ms <= 30_000 ? 'low' : 'run' };
+    return { text: t().hud.byoyomi(Math.ceil(tt.ms / 1000)), state: active ? 'byo' : 'idle' };
   };
   return { O: face('O'), X: face('X') };
 }
@@ -202,20 +203,20 @@ function tcTick(): void {
   renderClocks();
   if (!tcRunning || gs.status !== 'playing' || match.mode !== 'cpu') return;
   const p = gs.current;
-  const t = turnTime(c, c.left[p], tcUsed(c));
-  if (t.phase === 'out') {
+  const tt = turnTime(c, c.left[p], tcUsed(c));
+  if (tt.phase === 'out') {
     if (!busy) timeOut(p); // an animation in progress finishes first
     return;
   }
-  if (t.phase !== 'byoyomi' || p !== match.human) return;
+  if (tt.phase !== 'byoyomi' || p !== match.human) return;
   if (!tcByoShown) {
     tcByoShown = true;
     if (c.left[p] > 0) {
       sound.byoyomi();
-      toast(`持ち時間を使い切りました。ここから1手${c.byoyomiMs / 1000}秒の秒読みです`, 'warn');
+      toast(t().toast.byoyomi(c.byoyomiMs / 1000), 'warn');
     }
   }
-  const sec = Math.ceil(t.ms / 1000);
+  const sec = Math.ceil(tt.ms / 1000);
   if (sec !== tcAnnounced) {
     tcAnnounced = sec;
     if (sec <= 5) sound.tick(true);
@@ -256,68 +257,167 @@ function setSetting<K extends keyof Settings>(k: K, v: Settings[K]): void {
 
 // ═══════════════════════════════ Title screen ══════════════════════════════
 
+/** Which list the title menu shows: the two modes, or the choices inside one of them. */
+type TitleView = 'main' | 'local' | 'online';
+let titleView: TitleView = 'main';
+
+/** A small English label beside a Japanese one ("SETTINGS"); the English UI has none. */
+const tag = (s: string): string => (s ? `<small>${s}</small>` : '');
+
 function renderTitle(): void {
   teardownGame();
   teardownTitle();
-  const save = readSave();
-  const resumeInfo = !save ? ''
-    : save.match.mode === 'cpu'
-      ? `VS ${levelLabel(save.match.level)}・${save.gameState.ply + 1}手目`
-      : `ふたりで対戦・${PLAYER_COLORS[save.gameState.current].symbol}の番・${save.gameState.ply + 1}手目`;
+  titleView = 'main';
   root.innerHTML = `
     <div class="title">
       <div class="title-stage" id="title-stage"></div>
       <div class="title-vignette"></div>
-      <div class="title-corner">
-        <button type="button" class="corner-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="corner-menu" title="メニュー">${icon('menu')}</button>
-        <div class="corner-menu" id="corner-menu" role="menu" aria-label="メニュー" hidden>
-          <button type="button" role="menuitem" data-act="settings">${icon('sliders')}<span>設定</span><small>SETTINGS</small></button>
-          <button type="button" role="menuitem" data-act="records">${icon('chart')}<span>戦績</span><small>RECORDS</small></button>
-          <div class="corner-sep" role="separator"></div>
-          <button type="button" role="menuitem" data-act="exit" class="exit">${icon('power')}<span>EXIT</span><small>終了</small></button>
-        </div>
-      </div>
-      <div class="title-ui">
-        <div class="logo-wrap">
-          <h1 class="logo" aria-label="CUBE 6"><span class="logo-word">CUBE</span><span class="logo-six">6</span></h1>
-          <p class="subtitle">可変式立体マルバツゲーム</p>
-        </div>
-        <nav class="menu" aria-label="ゲームモード">
-          <button type="button" class="menu-btn primary" data-act="cpu"><span>${icon('cpu')}CPU対戦</span><small>VS CPU</small></button>
-          <button type="button" class="menu-btn" data-act="local"><span>${icon('users')}ふたりで対戦</span><small>2 PLAYERS</small></button>
-          <button type="button" class="menu-btn soon" data-act="online"><span>${icon('globe')}インターネット対戦</span><small>COMING SOON</small></button>
-          ${save ? `<button type="button" class="menu-btn resume" data-act="resume"><span>${icon('resume')}続きから</span><small>${resumeInfo}</small></button>` : ''}
-          <button type="button" class="menu-btn" data-act="rules"><span>${icon('help')}ルール説明</span><small>HOW TO PLAY</small></button>
-        </nav>
-      </div>
-      <footer class="title-foot">alpha ver.${APP_VERSION} ・ CPU対戦／ふたりで対戦 ・ 3×3×3 / 49ライン</footer>
     </div>`;
+  mountTitleUI(false);
+  startTitleDemo(root.querySelector('#title-stage') as HTMLElement);
+}
 
-  root.querySelectorAll<HTMLButtonElement>('.menu-btn').forEach(b => {
+/**
+ * Everything on the title screen but the 3D demo: the language button (top left), the ≡ menu
+ * (top right), the logo with the menu, and the footer. A language change rebuilds it
+ * without replaying the intro.
+ */
+function mountTitleUI(settled: boolean): void {
+  const host = root.querySelector<HTMLElement>('.title');
+  if (!host) return;
+  titleUiCleanup?.();
+  titleUiCleanup = null;
+  host.querySelectorAll('[data-title-ui]').forEach(el => el.remove());
+  host.classList.toggle('settled', settled);
+  const T = t().title;
+  const cur = LANGS.find(l => l.id === getLang()) ?? LANGS[0];
+  host.insertAdjacentHTML('beforeend', `
+    <div class="title-lang" data-title-ui>
+      <button type="button" class="corner-toggle lang-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="lang-menu" aria-label="Language / 言語" title="Language / 言語">${icon('globe')}<span>${cur.name}</span></button>
+      <div class="corner-menu lang-menu" id="lang-menu" role="menu" aria-label="Language / 言語" hidden>
+        ${LANGS.map(l => `<button type="button" role="menuitemradio" aria-checked="${l.id === cur.id}" data-lang="${l.id}" lang="${l.id}"><span>${l.name}</span>${l.id === cur.id ? icon('check') : ''}</button>`).join('')}
+      </div>
+    </div>
+    <div class="title-corner" data-title-ui>
+      <button type="button" class="corner-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="corner-menu" aria-label="${T.menu}" title="${T.menu}">${icon('menu')}</button>
+      <div class="corner-menu" id="corner-menu" role="menu" aria-label="${T.menu}" hidden>
+        <button type="button" role="menuitem" data-act="settings">${icon('sliders')}<span>${T.settings}</span>${tag(T.settingsTag)}</button>
+        <button type="button" role="menuitem" data-act="records">${icon('chart')}<span>${T.records}</span>${tag(T.recordsTag)}</button>
+        <div class="corner-sep" role="separator"></div>
+        <button type="button" role="menuitem" data-act="exit" class="exit">${icon('power')}<span>${T.exit}</span>${tag(T.exitTag)}</button>
+      </div>
+    </div>
+    <div class="title-ui" data-title-ui>
+      <div class="logo-wrap">
+        <h1 class="logo" aria-label="CUBE 6"><span class="logo-word">CUBE</span><span class="logo-six">6</span></h1>
+        <p class="subtitle">${T.subtitle}</p>
+      </div>
+      <nav class="menu" aria-label="${T.modesAria}"></nav>
+    </div>
+    <footer class="title-foot" data-title-ui>${T.foot(APP_VERSION)}</footer>`);
+  renderTitleMenu(settled);
+
+  const cleanups = [
+    setupDropdown(host.querySelector('.title-corner') as HTMLElement, b => {
+      const act = b.dataset['act'];
+      if (act === 'settings') showSettings();
+      else if (act === 'records') showRecords();
+      else if (act === 'exit') confirmExit();
+    }),
+    setupDropdown(host.querySelector('.title-lang') as HTMLElement, b => {
+      const l = b.dataset['lang'];
+      if (isLang(l) && l !== getLang()) changeLang(l);
+    }),
+  ];
+  // Esc inside ローカル / インターネット goes back to the two modes
+  const onEsc = (e: KeyboardEvent): void => {
+    if (e.key !== 'Escape' || e.defaultPrevented || isModalOpen() || titleView === 'main') return;
+    e.preventDefault();
+    sound.click();
+    openTitleView('main');
+  };
+  document.addEventListener('keydown', onEsc);
+  titleUiCleanup = () => {
+    cleanups.forEach(c => c());
+    document.removeEventListener('keydown', onEsc);
+  };
+}
+
+/** The menu: ローカル / インターネット (with 続きから and ルール説明), or the two choices inside one. */
+function renderTitleMenu(quick: boolean): void {
+  const nav = root.querySelector<HTMLElement>('.title .menu');
+  if (!nav) return;
+  const T = t().title;
+  const btn = (act: string, ico: IconName, label: string, tagText: string, cls = ''): string =>
+    `<button type="button" class="menu-btn${cls ? ` ${cls}` : ''}" data-act="${act}"><span>${icon(ico)}${label}</span>${tag(tagText)}</button>`;
+  let html: string;
+  if (titleView === 'main') {
+    const save = readSave();
+    const resumeInfo = !save ? ''
+      : save.match.mode === 'cpu'
+        ? T.resumeCpu(levelLabel(save.match.level), save.gameState.ply + 1)
+        : T.resumeTwo(PLAYER_COLORS[save.gameState.current].symbol, save.gameState.ply + 1);
+    html = btn('local', 'device', T.local, T.localTag, 'primary')
+      + btn('online', 'globe', T.online, T.onlineTag)
+      + (save ? `<button type="button" class="menu-btn resume" data-act="resume"><span>${icon('resume')}${T.resume}</span><small>${resumeInfo}</small></button>` : '')
+      + btn('rules', 'help', T.rules, T.rulesTag);
+  } else {
+    const local = titleView === 'local';
+    html = `<div class="menu-head"><span>${local ? T.local : T.online}</span>${tag(local ? T.localTag : T.onlineTag)}</div>`
+      + (local
+        ? btn('cpu', 'cpu', T.cpu, T.cpuTag, 'primary') + btn('two', 'users', T.two, T.twoTag)
+        : btn('random', 'shuffle', T.random, T.soonTag, 'soon') + btn('code', 'key', T.code, T.soonTag, 'soon'))
+      + `<button type="button" class="menu-back" data-act="back">${icon('back')}<span>${T.back}</span></button>`;
+  }
+  nav.dataset['view'] = titleView;
+  nav.classList.toggle('quick', quick);
+  nav.innerHTML = html;
+  nav.querySelectorAll<HTMLButtonElement>('button').forEach(b => {
     b.addEventListener('pointerenter', () => sound.hover());
     b.addEventListener('click', () => {
       sound.click();
       const act = b.dataset['act'];
-      if (act === 'cpu') openCpuSetup();
-      else if (act === 'local') requestNewGame({ mode: 'local', undos: 0 });
-      else if (act === 'online') showOnline();
+      if (act === 'local' || act === 'online') openTitleView(act);
+      else if (act === 'back') openTitleView('main');
+      else if (act === 'cpu') openCpuSetup();
+      else if (act === 'two') requestNewGame({ mode: 'local', undos: 0 });
+      else if (act === 'random') showOnline(T.random);
+      else if (act === 'code') showOnline(T.code);
       else if (act === 'resume') resumeGame();
       else if (act === 'rules') showRules();
     });
   });
-  setupCornerMenu(root.querySelector('.title-corner') as HTMLElement);
-  startTitleDemo(root.querySelector('#title-stage') as HTMLElement);
 }
 
-/** The ≡ button in the title's top-right corner: 設定・戦績・EXIT. */
-function setupCornerMenu(corner: HTMLElement): void {
-  const toggle = corner.querySelector('.corner-toggle') as HTMLButtonElement;
-  const menu = corner.querySelector('.corner-menu') as HTMLElement;
+/** Switches the menu list; focus moves into the new list, or back to the button that opened it. */
+function openTitleView(v: TitleView): void {
+  const from = titleView;
+  titleView = v;
+  renderTitleMenu(true);
+  const nav = root.querySelector<HTMLElement>('.title .menu');
+  const target = v === 'main'
+    ? nav?.querySelector<HTMLElement>(`[data-act="${from}"]`)
+    : nav?.querySelector<HTMLElement>('.menu-btn');
+  target?.focus({ preventScroll: true });
+}
+
+/** The language chosen on the title screen: everything is shown in it from now on. */
+function changeLang(l: Lang): void {
+  setSetting('lang', l);
+  setLang(l);
+  mountTitleUI(true);
+  root.querySelector<HTMLElement>('.lang-toggle')?.focus({ preventScroll: true });
+}
+
+/** A button that opens a small menu (≡: 設定・戦績・EXIT, or the languages). Returns its cleanup. */
+function setupDropdown(box: HTMLElement, onPick: (item: HTMLButtonElement) => void): () => void {
+  const toggle = box.querySelector('.corner-toggle') as HTMLButtonElement;
+  const menu = box.querySelector('.corner-menu') as HTMLElement;
   const items = [...menu.querySelectorAll<HTMLButtonElement>('button')];
   const setOpen = (open: boolean, focus = false): void => {
     menu.hidden = !open;
     toggle.setAttribute('aria-expanded', String(open));
-    if (open && focus) items[0]?.focus();
+    if (open && focus) (items.find(b => b.getAttribute('aria-checked') === 'true') ?? items[0])?.focus();
   };
   toggle.addEventListener('click', () => {
     sound.click();
@@ -333,36 +433,39 @@ function setupCornerMenu(corner: HTMLElement): void {
     b.addEventListener('click', () => {
       sound.click();
       setOpen(false);
-      const act = b.dataset['act'];
-      if (act === 'settings') showSettings();
-      else if (act === 'records') showRecords();
-      else if (act === 'exit') confirmExit();
+      onPick(b);
     });
   });
   const outside = (e: PointerEvent): void => {
-    if (!menu.hidden && !corner.contains(e.target as Node)) setOpen(false);
+    if (!menu.hidden && !box.contains(e.target as Node)) setOpen(false);
   };
   const onEsc = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape' && !menu.hidden && !isModalOpen()) { setOpen(false); toggle.focus(); }
+    if (e.key === 'Escape' && !menu.hidden && !isModalOpen()) {
+      e.preventDefault();
+      setOpen(false);
+      toggle.focus();
+    }
   };
   document.addEventListener('pointerdown', outside, true);
   document.addEventListener('keydown', onEsc);
-  titleCleanup = () => {
+  return () => {
     document.removeEventListener('pointerdown', outside, true);
     document.removeEventListener('keydown', onEsc);
   };
 }
 
-function showOnline(): void {
+/** ランダム対戦 / 合言葉で遊ぶ: not built yet. */
+function showOnline(name: string): void {
   openModal({
-    title: 'インターネット対戦', subtitle: 'ONLINE',
-    content: '<p>インターネット対戦は<b>準備中</b>です。</p><p><small>いまは「CPU対戦」と「ふたりで対戦」で遊べます。</small></p>',
-    actions: [{ label: '閉じる', kind: 'primary' }],
+    title: name, subtitle: t().title.onlineTag,
+    content: t().online.soon,
+    actions: [{ label: t().common.close, kind: 'primary' }],
   });
 }
 
 /** 戦績: wins / losses / draws against each CPU level (kept in this browser). */
 function showRecords(): void {
+  const R = t().records;
   const prog = loadProgress();
   const levels: CpuLevel[] = prog.unlocked ? [...NORMAL_LEVELS, HIDDEN_LEVEL] : [...NORMAL_LEVELS];
   const rate = (w: number, n: number): string => (n ? `${Math.round((w / n) * 100)}%` : '—');
@@ -376,24 +479,25 @@ function showRecords(): void {
       <td>${r.w}</td><td>${r.l}</td><td>${r.d}</td><td class="rate">${rate(r.w, r.w + r.l + r.d)}</td></tr>`;
   }).join('');
   openModal({
-    title: '戦績', subtitle: 'RECORDS', className: 'records-modal',
+    title: R.title, subtitle: R.tag, className: 'records-modal',
     content: `<table class="records">
-        <thead><tr><th scope="col">CPU</th><th scope="col">勝</th><th scope="col">敗</th><th scope="col">分</th><th scope="col">勝率</th></tr></thead>
+        <thead><tr><th scope="col">CPU</th><th scope="col">${R.win}</th><th scope="col">${R.loss}</th><th scope="col">${R.draw}</th><th scope="col">${R.rate}</th></tr></thead>
         <tbody>${rows}</tbody>
-        <tfoot><tr><th scope="row">合計</th><td>${tw}</td><td>${tl}</td><td>${td}</td><td class="rate">${rate(tw, tw + tl + td)}</td></tr></tfoot>
+        <tfoot><tr><th scope="row">${R.total}</th><td>${tw}</td><td>${tl}</td><td>${td}</td><td class="rate">${rate(tw, tw + tl + td)}</td></tr></tfoot>
       </table>
-      <p class="records-note">CPU対戦の成績です（このブラウザに保存されています）。</p>`,
-    actions: [{ label: '閉じる', kind: 'primary' }],
+      <p class="records-note">${R.note}</p>`,
+    actions: [{ label: t().common.close, kind: 'primary' }],
   });
 }
 
 function confirmExit(): void {
+  const X = t().exit;
   openModal({
-    title: 'ゲームを終了', subtitle: 'EXIT',
-    content: '<p>CUBE 6 を終了しますか？</p>',
+    title: X.title, subtitle: X.tag,
+    content: `<p>${X.ask}</p>`,
     actions: [
-      { label: 'キャンセル', kind: 'ghost', autofocus: true },
-      { label: '終了する', kind: 'danger', onClick: () => { setTimeout(exitGame, 0); } },
+      { label: t().common.cancel, kind: 'ghost', autofocus: true },
+      { label: X.quit, kind: 'danger', onClick: () => { setTimeout(exitGame, 0); } },
     ],
   });
 }
@@ -403,12 +507,13 @@ function exitGame(): void {
   teardownGame();
   teardownTitle();
   try { window.close(); } catch { /* not allowed for this tab */ }
+  const X = t().exit;
   root.innerHTML = `
     <div class="exit-screen">
       <h1 class="logo" aria-label="CUBE 6"><span class="logo-word">CUBE</span><span class="logo-six">6</span></h1>
-      <p>ゲームを終了しました。</p>
-      <p><small>このタブ（ウィンドウ）を閉じてください。</small></p>
-      <button type="button" class="btn ghost" data-act="back">${icon('home')}タイトルに戻る</button>
+      <p>${X.done}</p>
+      <p><small>${X.closeTab}</small></p>
+      <button type="button" class="btn ghost" data-act="back">${icon('home')}${X.back}</button>
     </div>`;
   root.querySelector('[data-act="back"]')?.addEventListener('click', () => { sound.click(); renderTitle(); });
 }
@@ -462,20 +567,21 @@ function startTitleDemo(host: HTMLElement): void {
 function teardownTitle(): void {
   title?.stop();
   title = null;
-  titleCleanup?.();
-  titleCleanup = null;
+  titleUiCleanup?.();
+  titleUiCleanup = null;
 }
 
 // ═══════════════════════════════ Game screen ═══════════════════════════════
 
 function requestNewGame(m: MatchInfo): void {
   if (readSave()) {
+    const N = t().newGame;
     openModal({
-      title: '新しいゲーム', subtitle: 'NEW GAME',
-      content: '<p>保存されている対局があります。<br>新しく始めると上書きされます。</p>',
+      title: N.title, subtitle: N.tag,
+      content: `<p>${N.body}</p>`,
       actions: [
-        { label: 'キャンセル', kind: 'ghost' },
-        { label: '新しく始める', kind: 'primary', onClick: () => { startGame(m); } },
+        { label: t().common.cancel, kind: 'ghost' },
+        { label: N.start, kind: 'primary', onClick: () => { startGame(m); } },
       ],
     });
   } else {
@@ -485,6 +591,7 @@ function requestNewGame(m: MatchInfo): void {
 
 /** CPU game setup: strength (level 6 only once unlocked), who moves first and the clock. */
 function openCpuSetup(): void {
+  const S = t().cpuSetup;
   const prog = loadProgress();
   const levels: CpuLevel[] = prog.unlocked ? [...NORMAL_LEVELS, HIDDEN_LEVEL] : [...NORMAL_LEVELS];
   let level: CpuLevel = levels.includes(settings.cpuLevel) ? settings.cpuLevel : 1;
@@ -501,22 +608,22 @@ function openCpuSetup(): void {
   body.className = 'cpu-setup';
   body.innerHTML = `
     <section>
-      <h3>強さ</h3>
-      <div class="lv-grid" role="radiogroup" aria-label="CPUの強さ">${levels.map(card).join('')}</div>
+      <h3>${S.strength}</h3>
+      <div class="lv-grid" role="radiogroup" aria-label="${S.strengthAria}">${levels.map(card).join('')}</div>
     </section>
     <section>
-      <h3>手番</h3>
-      <div class="seg full order" role="radiogroup" aria-label="あなたの手番" data-seg="order">
-        ${([['human', '先手'], ['cpu', '後手'], ['random', 'ランダム']] as [CpuOrder, string][])
+      <h3>${S.order}</h3>
+      <div class="seg full order" role="radiogroup" aria-label="${S.orderAria}" data-seg="order">
+        ${([['human', S.first], ['cpu', S.second], ['random', t().common.random]] as [CpuOrder, string][])
           .map(([v, l]) => `<button type="button" role="radio" data-v="${v}" aria-checked="${v === order}">${l}</button>`).join('')}
       </div>
-      <p class="setup-note">あなたは <b class="o-txt">〇（青）</b>、CPU は <b class="x-txt">×（赤）</b>。先手のほうが有利です。</p>
+      <p class="setup-note">${S.sides}</p>
     </section>
     <section>
-      <h3>持ち時間</h3>
-      <div class="seg full" role="radiogroup" aria-label="持ち時間" data-seg="clock">
+      <h3>${S.clock}</h3>
+      <div class="seg full" role="radiogroup" aria-label="${S.clock}" data-seg="clock">
         ${(['3m30s', '3m10s', 'off'] as ClockPreset[])
-          .map(v => `<button type="button" role="radio" data-v="${v}" aria-checked="${v === clockSel}">${v === 'off' ? 'なし（練習）' : presetLabel(v)}</button>`).join('')}
+          .map(v => `<button type="button" role="radio" data-v="${v}" aria-checked="${v === clockSel}">${v === 'off' ? S.clockOff : presetLabel(v, getLang())}</button>`).join('')}
       </div>
       <p class="setup-note" data-clock-note></p>
     </section>`;
@@ -524,8 +631,8 @@ function openCpuSetup(): void {
   const syncClockNote = (): void => {
     if (!clockNote) return;
     clockNote.textContent = clockSel === 'off'
-      ? '時間無制限の練習対局です。'
-      : `お互いに持ち時間${CLOCK_PRESETS[clockSel].mainMs / 60000}分。使い切ると1手${CLOCK_PRESETS[clockSel].byoyomiMs / 1000}秒の秒読みになり、超えると負けです。`;
+      ? S.clockOffNote
+      : S.clockNote(CLOCK_PRESETS[clockSel].mainMs / 60000, CLOCK_PRESETS[clockSel].byoyomiMs / 1000);
   };
   syncClockNote();
   body.querySelectorAll<HTMLButtonElement>('.lv-card').forEach(b => {
@@ -547,13 +654,13 @@ function openCpuSetup(): void {
     });
   });
   openModal({
-    title: 'CPU対戦', subtitle: 'VS CPU',
+    title: S.title, subtitle: S.tag,
     content: body,
     className: 'setup-modal',
     actions: [
-      { label: 'キャンセル', kind: 'ghost' },
+      { label: t().common.cancel, kind: 'ghost' },
       {
-        label: '対戦開始', kind: 'primary', onClick: () => {
+        label: S.start, kind: 'primary', onClick: () => {
           setSetting('cpuLevel', level);
           setSetting('cpuOrder', order);
           setSetting('cpuClock', clockSel);
@@ -634,43 +741,44 @@ function renderGame(): boolean {
   tcAnnounced = -1;
   tcByoShown = false;
 
+  const G = t().game;
   root.innerHTML = `
     <div class="game" data-turn="${gs.current}">
       <header class="topbar">
-        <button type="button" class="brand" data-act="home" title="タイトルへ">CUBE<b>6</b></button>
+        <button type="button" class="brand" data-act="home" title="${G.toTitleTip}">CUBE<b>6</b></button>
         <div class="hud" id="hud">
           <div class="hud-side o" data-side="O"></div>
           <div class="hud-status" role="status"></div>
           <div class="hud-side x" data-side="X"></div>
         </div>
         <div class="top-actions">
-          <button type="button" class="icon-btn" data-act="symbols" title="刻印表示：球に ○× を表示 (S)">${icon('symbols')}</button>
-          <button type="button" class="icon-btn" data-act="sound" title="サウンド (M)"></button>
-          <button type="button" class="icon-btn" data-act="settings" title="設定">${icon('sliders')}</button>
-          <button type="button" class="icon-btn" data-act="help" title="ルール (H)">${icon('help')}</button>
-          <button type="button" class="icon-btn" data-act="pause" title="中断してタイトルへ">${icon('pause')}</button>
+          <button type="button" class="icon-btn" data-act="symbols" title="${G.symbolsTip}">${icon('symbols')}</button>
+          <button type="button" class="icon-btn" data-act="sound" title="${G.soundTip}"></button>
+          <button type="button" class="icon-btn" data-act="settings" title="${G.settingsTip}">${icon('sliders')}</button>
+          <button type="button" class="icon-btn" data-act="help" title="${G.rulesTip}">${icon('help')}</button>
+          <button type="button" class="icon-btn" data-act="pause" title="${G.pauseTip}">${icon('pause')}</button>
         </div>
       </header>
-      <aside class="side schematic-panel" id="schematic" aria-label="見取り図"></aside>
+      <aside class="side schematic-panel" id="schematic" aria-label="${G.mapAria}"></aside>
       <main class="stage" id="stage">
         <div class="toast-host" id="toasts" aria-live="polite"></div>
         <div class="turn-banner" id="banner" aria-hidden="true"></div>
-        <div class="stage-tools" role="toolbar" aria-label="視点">
+        <div class="stage-tools" role="toolbar" aria-label="${G.viewAria}">
           <div class="seg-tools">
-            <button type="button" class="tool-btn" data-view="iso" title="斜め (1 / R)">斜め</button>
-            <button type="button" class="tool-btn" data-view="front" title="正面 (2)">正面</button>
-            <button type="button" class="tool-btn" data-view="top" title="真上 (3)">真上</button>
-            <button type="button" class="tool-btn" data-view="side" title="側面 (4)">側面</button>
+            <button type="button" class="tool-btn" data-view="iso" title="${G.viewIsoTip}">${G.viewIso}</button>
+            <button type="button" class="tool-btn" data-view="front" title="${G.viewFrontTip}">${G.viewFront}</button>
+            <button type="button" class="tool-btn" data-view="top" title="${G.viewTopTip}">${G.viewTop}</button>
+            <button type="button" class="tool-btn" data-view="side" title="${G.viewSideTip}">${G.viewSide}</button>
           </div>
           <div class="seg-tools">
-            <button type="button" class="tool-btn icon" data-act="explode" title="展開表示：層の間隔を広げる (V)">${icon('expand')}</button>
-            <button type="button" class="tool-btn icon" data-act="zoom-in" title="ズームイン (+)">${icon('zoomIn')}</button>
-            <button type="button" class="tool-btn icon" data-act="zoom-out" title="ズームアウト (−)">${icon('zoomOut')}</button>
+            <button type="button" class="tool-btn icon" data-act="explode" title="${G.explodeTip}">${icon('expand')}</button>
+            <button type="button" class="tool-btn icon" data-act="zoom-in" title="${G.zoomInTip}">${icon('zoomIn')}</button>
+            <button type="button" class="tool-btn icon" data-act="zoom-out" title="${G.zoomOutTip}">${icon('zoomOut')}</button>
           </div>
         </div>
-        <div class="stage-help">ドラッグ：視点回転　ホイール／ピンチ：ズーム</div>
+        <div class="stage-help">${G.stageHelp}</div>
       </main>
-      <aside class="side controls-panel" id="controls" aria-label="操作パネル"></aside>
+      <aside class="side controls-panel" id="controls" aria-label="${G.controlsAria}"></aside>
       <div class="sr-only" id="live" aria-live="polite"></div>
     </div>`;
 
@@ -681,7 +789,7 @@ function renderGame(): boolean {
     scene = new Scene3D(stage);
   } catch (e) {
     console.error(e);
-    stage.innerHTML = `<div class="no-webgl-msg">WebGL を利用できないため 3D 表示を開始できませんでした。<br>ブラウザの設定（ハードウェアアクセラレーション）をご確認ください。<br><button type="button" class="btn primary">${icon('home')}タイトルへ</button></div>`;
+    stage.innerHTML = `<div class="no-webgl-msg">${G.noWebgl}<br><button type="button" class="btn primary">${icon('home')}${t().common.toTitle}</button></div>`;
     stage.querySelector('button')?.addEventListener('click', () => renderTitle());
     return false;
   }
@@ -763,7 +871,7 @@ function syncTopButtons(): void {
   if (snd) {
     snd.innerHTML = icon(settings.sound ? 'soundOn' : 'soundOff');
     snd.setAttribute('aria-pressed', String(settings.sound));
-    snd.setAttribute('aria-label', settings.sound ? 'サウンド：オン' : 'サウンド：オフ');
+    snd.setAttribute('aria-label', settings.sound ? t().game.soundOn : t().game.soundOff);
   }
   ui.el.querySelector('[data-act="explode"]')?.setAttribute('aria-pressed', String(settings.explode));
 }
@@ -776,7 +884,7 @@ function isCpuTurn(): boolean {
 }
 /** "PLAYER 1" (〇) / "PLAYER 2" (×) for two people; "あなた" / "CPU" against the CPU. */
 function nameOf(p: Player): string {
-  if (match.mode === 'cpu') return p === match.human ? 'あなた' : 'CPU';
+  if (match.mode === 'cpu') return p === match.human ? t().common.you : 'CPU';
   return p === 'O' ? 'PLAYER 1' : 'PLAYER 2';
 }
 /** Human input is blocked during animations and while the CPU plays its turn. */
@@ -786,9 +894,9 @@ function locked(): boolean { return busy || cpuActing; }
 function step1Label(): string {
   if (phase === 'step2') {
     const last = log[log.length - 1];
-    return last && last.step1.kind === 'move' ? '移動' : '配置';
+    return last && last.step1.kind === 'move' ? t().hud.move : t().hud.place;
   }
-  return canPlaceNow() ? '配置' : '移動';
+  return canPlaceNow() ? t().hud.place : t().hud.move;
 }
 
 function targetsNow(): number[] {
@@ -861,10 +969,10 @@ function resultText(state: GameState): { title: string; reason: string; color: s
   if (state.status === 'win:O' || state.status === 'win:X') {
     const w: Player = state.status === 'win:O' ? 'O' : 'X';
     const title = match.mode === 'cpu' ? (w === match.human ? 'YOU WIN' : 'CPU WIN') : `${nameOf(w)} WIN`;
-    const reason = state.winReason === 'timeout' ? '時間切れ' : state.winReason === 'selfDestruct' ? '自爆' : '';
+    const reason = state.winReason === 'timeout' ? t().result.timeout : state.winReason === 'selfDestruct' ? t().result.selfDestruct : '';
     return { title, reason, color: PLAYER_COLORS[w].css };
   }
-  return { title: 'DRAW', reason: `手数上限（${state.settings.turnLimit ?? '-'}手）`, color: '#ffcc4d' };
+  return { title: 'DRAW', reason: t().result.limit(state.settings.turnLimit), color: '#ffcc4d' };
 }
 
 // ── Refresh (phase changes) ────────────────────────────────────────────────
@@ -974,6 +1082,7 @@ function outcomeOf(res: GameState, mover: Player, checked: boolean): Outcome | n
  */
 function updateHud(): void {
   if (!ui) return;
+  const H = t().hud;
   const playing = gs.status === 'playing';
   const clock = gameClock();
   for (const p of ['O', 'X'] as const) {
@@ -985,8 +1094,8 @@ function updateHud(): void {
     el.className = `hud-side ${p.toLowerCase()}${playing && !reviewing && gs.current === p ? ' cur' : ''}`;
     el.innerHTML = `<span class="hud-chip">${PLAYER_COLORS[p].glyph}</span>
       <span class="hud-info"><span class="hud-name">${nameOf(p)}${lv}</span>
-        <span class="hud-hand" title="手駒 ${n}／6"><span class="dots">${dots}</span><span class="hud-hand-n">${n > 0 ? `手駒 ${n}` : '移動フェーズ'}</span></span></span>
-      ${clock ? `<span class="hud-clock" data-clock="${p}" title="持ち時間">${icon('timer')}<b></b></span>` : ''}`;
+        <span class="hud-hand" title="${H.handTip(n)}"><span class="dots">${dots}</span><span class="hud-hand-n">${n > 0 ? H.hand(n) : H.movePhase}</span></span></span>
+      ${clock ? `<span class="hud-clock" data-clock="${p}" title="${H.clockTip}">${icon('timer')}<b></b></span>` : ''}`;
   }
   const st = ui.hud.querySelector<HTMLElement>('.hud-status');
   if (st) {
@@ -998,20 +1107,21 @@ function updateHud(): void {
 }
 
 function hudStatus(): { main: string; sub: string; cls: string } {
-  const ply = `<span class="hud-ply">手数 ${gs.ply}${gs.settings.turnLimit ? ` / ${gs.settings.turnLimit}` : ''}</span>`;
-  if (reviewing) return { main: '盤面確認中', sub: '<span>対局は進みません</span>', cls: 'review' };
+  const H = t().hud;
+  const ply = `<span class="hud-ply">${H.ply(gs.ply, gs.settings.turnLimit)}</span>`;
+  if (reviewing) return { main: H.reviewing, sub: `<span>${H.reviewingSub}</span>`, cls: 'review' };
   if (gs.status !== 'playing') return { main: resultText(gs).title, sub: ply, cls: 'over' };
   const s1 = phase !== 'step2';
-  const steps = `<span class="st ${s1 ? 'on' : 'done'}">①${step1Label()}</span><span class="st ${s1 ? '' : 'on'}">②操作</span>`;
+  const steps = `<span class="st ${s1 ? 'on' : 'done'}">①${step1Label()}</span><span class="st ${s1 ? '' : 'on'}">②${H.cube}</span>`;
   const checked = inCheck(gs);
   if (isCpuTurn()) {
     const dots = cpuActing && s1 ? '<span class="think-dots"><i></i><i></i><i></i></span>' : '';
     // the CPU being in check is your 王手: a small mark, not the highlight
-    return { main: `CPU TURN${dots}${checked ? '<span class="hud-badge">王手</span>' : ''}`, sub: steps + ply, cls: 'cpu' };
+    return { main: `CPU TURN${dots}${checked ? `<span class="hud-badge">${H.checkBadge}</span>` : ''}`, sub: steps + ply, cls: 'cpu' };
   }
   if (checked) {
     const who = match.mode === 'local' ? `<span class="hud-who">${nameOf(gs.current)}</span>` : '';
-    return { main: '王手！', sub: who + steps + ply, cls: 'check' };
+    return { main: H.check, sub: who + steps + ply, cls: 'check' };
   }
   return { main: turnName(gs.current), sub: steps + ply, cls: 'turn' };
 }
@@ -1020,14 +1130,15 @@ function announceTurn(): void {
   if (!ui || gs.status !== 'playing') return;
   const P = PLAYER_COLORS[gs.current];
   const checked = inCheck(gs);
-  const sub = checked ? '王手！ 相手の列を崩す' : canPlaceNow() ? `手駒 残り${gs.hand[gs.current]}` : '移動フェーズ';
+  const H = t().hud;
+  const sub = checked ? H.bannerCheck : canPlaceNow() ? H.bannerHand(gs.hand[gs.current]) : H.movePhase;
   ui.banner.innerHTML = `<div class="banner-inner ${gs.current.toLowerCase()}${checked ? ' check' : ''}"><span class="b-chip">${P.glyph}</span><span class="b-main">${turnName(gs.current)}</span><span class="b-sub">${sub}</span></div>`;
   ui.banner.classList.remove('show');
   void ui.banner.offsetWidth;
   ui.banner.classList.add('show');
   ui.live.textContent = checked
-    ? `王手。${nameOf(gs.current)}の番です。${nameOf(other(gs.current))}の列を崩してください。`
-    : `${nameOf(gs.current)}の番です。`;
+    ? H.liveCheck(nameOf(gs.current), nameOf(other(gs.current)))
+    : H.liveTurn(nameOf(gs.current));
   if (checked) sound.check();
   else sound.turn(gs.current);
 }
@@ -1065,7 +1176,7 @@ function onCellClick(i: number | null, raw: number | null): void {
   if (cpuActing) {
     if (raw !== null && performance.now() - lastBusyToast > 2500) {
       lastBusyToast = performance.now();
-      toast('CPU の番です。少しお待ちください');
+      toast(t().toast.cpuTurn);
     }
     return;
   }
@@ -1073,7 +1184,7 @@ function onCellClick(i: number | null, raw: number | null): void {
   if (phase === 'step2') {
     if (raw !== null) {
       sound.invalid();
-      toast('キューブ操作を選んで「確定」してください', 'info');
+      toast(t().toast.pickCube, 'info');
     }
     return;
   }
@@ -1113,10 +1224,11 @@ function explainInvalid(raw: number): void {
   sound.invalid();
   ui.scene.flashInvalid(raw);
   const m = gs.board[raw];
-  if (canPlaceNow()) toast(m ? 'そのマスには既に駒があります' : 'そのマスには置けません', 'warn');
-  else if (m && m !== gs.current) toast('相手の駒は動かせません', 'warn');
-  else if (!m && phase === 'step1') toast('先に動かす自分の駒を選んでください', 'warn');
-  else toast('そのマスは選べません', 'warn');
+  const T = t().toast;
+  if (canPlaceNow()) toast(m ? T.occupied : T.cantPlace, 'warn');
+  else if (m && m !== gs.current) toast(T.notYours, 'warn');
+  else if (!m && phase === 'step1') toast(T.pickOwn, 'warn');
+  else toast(T.cantPick, 'warn');
 }
 
 function pushHistory(): void {
@@ -1181,9 +1293,7 @@ async function doMove(from: number, to: number): Promise<void> {
 /** Step ① completed your own line: it only counts if it survives your cube move (then it is 王手). */
 function noteOwnLine(mark: Player): void {
   if (gs.status !== 'playing' || cpuActing || completedLines(gs.board, mark).length === 0) return;
-  toast(isMate(gs.board, mark)
-    ? 'どの操作でも崩れない列が揃いました。②を終えると詰みです'
-    : '列が揃いました。②の操作のあとも残っていれば王手です');
+  toast(isMate(gs.board, mark) ? t().toast.unbreakable : t().toast.ownLine);
 }
 
 async function doCubeMove(move: CubeMove): Promise<void> {
@@ -1322,13 +1432,13 @@ function cancelStep1(): void {
   // the snapshot taken just before this turn's step ①
   const snap = history[history.length - 1];
   if (!snap || snap.gameState.ply !== gs.ply || snap.gameState.current !== gs.current) return;
-  const what = log[log.length - 1]?.step1.kind === 'move' ? '移動' : '配置';
+  const kind = log[log.length - 1]?.step1.kind === 'move' ? 'move' : 'place';
   history = history.slice(0, -1);
   restore(snap);
   // a move starts over from choosing the piece, not with it still lifted
   if (snap.phase === 'step1-move-from') { phase = 'step1'; selectedFrom = null; }
   sound.undo();
-  toast(`①の${what}を取り消しました`);
+  toast(t().toast.undone(kind));
   refresh();
 }
 
@@ -1421,14 +1531,14 @@ async function runCpuTurn(): Promise<void> {
       if (!alive()) return;
       u.scene.setHover(null, null);
       u.schematic.setHover(null);
-      u.live.textContent = `CPU：${describeStep1(a)}`;
+      u.live.textContent = t().hud.liveCpu(describeStep1(a, getLang()));
       await doPlace(a.index);
     } else {
       u.scene.setSelected(a.from);
       sound.select();
       await wait(520);
       if (!alive()) return;
-      u.live.textContent = `CPU：${describeStep1(a)}`;
+      u.live.textContent = t().hud.liveCpu(describeStep1(a, getLang()));
       await doMove(a.from, a.to);
     }
     if (!alive() || gs.status !== 'playing') return; // e.g. the clock ran out meanwhile
@@ -1438,7 +1548,7 @@ async function runCpuTurn(): Promise<void> {
   selectedMove = cube;
   sound.preview();
   updatePreview();
-  u.live.textContent = `CPU：${describeMove(cube)}`;
+  u.live.textContent = t().hud.liveCpu(describeMove(cube, getLang()));
   await wait(1050);
   if (!alive()) return;
   await untilNoModal(alive);
@@ -1515,12 +1625,12 @@ function toggleSound(): void {
   setSetting('sound', !settings.sound);
   sound.unlock();
   sound.toggle(settings.sound);
-  toast(settings.sound ? 'サウンド：オン' : 'サウンド：オフ');
+  toast(settings.sound ? t().game.soundOn : t().game.soundOff);
 }
 function toggleSymbols(): void {
   setSetting('showSymbols', !settings.showSymbols);
   sound.toggle(settings.showSymbols);
-  toast(settings.showSymbols ? '刻印表示：オン（球に ○×）' : '刻印表示：オフ');
+  toast(settings.showSymbols ? t().game.symbolsOn : t().game.symbolsOff);
 }
 function toggleExplode(): void {
   setSetting('explode', !settings.explode);
@@ -1574,8 +1684,8 @@ function onKey(e: KeyboardEvent): void {
 
 function showRules(): void {
   const m = openModal({
-    title: 'ルール説明', subtitle: 'HOW TO PLAY', content: rulesHTML(), className: 'wide rules-modal',
-    actions: [{ label: '閉じる', kind: 'primary' }],
+    title: t().rules.title, subtitle: t().rules.tag, content: rulesHTML(), className: 'wide rules-modal',
+    actions: [{ label: t().common.close, kind: 'primary' }],
   });
   // table of contents: jump within the dialog (no URL change)
   m.el.querySelectorAll<HTMLButtonElement>('.rules-nav button').forEach(b => {
@@ -1598,14 +1708,15 @@ function showResult(): void {
     refresh();
   }
   resultModal?.close();
+  const TR = t().result, TC = t().common;
   const r = resultText(gs);
   const winner: Player | null = gs.status === 'win:O' ? 'O' : gs.status === 'win:X' ? 'X' : null;
   const placed = log.filter(e => e.step1.kind === 'place').length;
   const moved = log.length - placed;
   const vsCpu = match.mode === 'cpu' ? match : null;
   const unlock = vsCpu && justUnlocked
-    ? `<div class="unlock" role="status">${icon('zap')}<div><b>隠しレベル解放！</b>
-        <span>「${levelLabel(HIDDEN_LEVEL)}」に挑戦できるようになりました。CPU対戦の強さ選択から選べます。</span></div></div>`
+    ? `<div class="unlock" role="status">${icon('zap')}<div><b>${TR.unlockTitle}</b>
+        <span>${TR.unlockBody(levelLabel(HIDDEN_LEVEL))}</span></div></div>`
     : '';
   const body = `
     <div class="result" style="--rc:${r.color}">
@@ -1613,24 +1724,24 @@ function showResult(): void {
       <div class="result-title">${r.title}</div>
       ${r.reason ? `<div class="result-reason">${r.reason}</div>` : ''}
       <dl class="stats">
-        <div><dt>手数</dt><dd>${gs.ply}</dd></div>
+        <div><dt>${TR.moves}</dt><dd>${gs.ply}</dd></div>
         ${vsCpu?.clock
-          ? `<div><dt>残り持ち時間</dt><dd>${vsCpu.clock.left[vsCpu.human] > 0 || gs.winReason === 'timeout'
-            ? fmtClock(vsCpu.clock.left[vsCpu.human]) : '秒読み'}</dd></div>`
-          : `<div><dt>配置／移動</dt><dd>${placed}／${moved}</dd></div>`}
-        <div><dt>経過時間</dt><dd>${fmtTime(currentElapsed())}</dd></div>
+          ? `<div><dt>${TR.timeLeft}</dt><dd>${vsCpu.clock.left[vsCpu.human] > 0 || gs.winReason === 'timeout'
+            ? fmtClock(vsCpu.clock.left[vsCpu.human]) : TR.byoyomi}</dd></div>`
+          : `<div><dt>${TR.placedMoved}</dt><dd>${placed}${getLang() === 'ja' ? '／' : ' / '}${moved}</dd></div>`}
+        <div><dt>${TR.elapsed}</dt><dd>${fmtTime(currentElapsed())}</dd></div>
       </dl>
       ${unlock}
     </div>`;
   const actions: ModalAction[] = [
-    { label: 'タイトルへ', kind: 'ghost', onClick: () => { renderTitle(); } },
-    { label: 'もう一度', kind: 'primary', autofocus: true, onClick: () => { startGame(); } },
+    { label: TC.toTitle, kind: 'ghost', onClick: () => { renderTitle(); } },
+    { label: TC.replay, kind: 'primary', autofocus: true, onClick: () => { startGame(); } },
   ];
-  if (nextLevelOf()) actions.push({ label: '次のレベル', kind: 'ghost', onClick: () => { startNextLevel(); } });
+  if (nextLevelOf()) actions.push({ label: TC.nextLevel, kind: 'ghost', onClick: () => { startNextLevel(); } });
   const aside = canPlayOn()
-    ? `<div class="aside-head">${icon('eye')}<b>盤面の確認</b></div>
-      <p>どの操作でも${nameOf(other(gs.current))}の列が残るかを、盤面で確かめられます。</p>
-      <button type="button" class="btn ok" data-act="review">${icon('eye')}盤面を確認する</button>`
+    ? `<div class="aside-head">${icon('eye')}<b>${TR.reviewHead}</b></div>
+      <p>${TR.reviewBody(nameOf(other(gs.current)))}</p>
+      <button type="button" class="btn ok" data-act="review">${icon('eye')}${TR.review}</button>`
     : undefined;
   resultModal = openModal({
     content: body,
@@ -1648,22 +1759,24 @@ function showResult(): void {
 
 function confirmQuit(): void {
   if (gs.status !== 'playing') { renderTitle(); return; }
-  const vs = match.mode === 'cpu' ? `VS CPU ${levelLabel(match.level)}` : 'ふたりで対戦';
+  const P = t().pause;
+  const vs = match.mode === 'cpu' ? P.vsCpu(levelLabel(match.level)) : P.two;
   const clock = clockFaces();
   openModal({
-    title: 'タイトルへ戻る', subtitle: 'PAUSE',
-    content: `<div class="pause-sum"><span>${vs}</span><span>手数 ${gs.ply}</span><span>${nameOf(gs.current)}の番</span>${
+    title: P.title, subtitle: P.tag,
+    content: `<div class="pause-sum"><span>${vs}</span><span>${P.ply(gs.ply)}</span><span>${P.turn(nameOf(gs.current))}</span>${
       clock && match.mode === 'cpu' ? `<span>${icon('timer')}${clock[match.human].text}</span>` : ''}</div>
-      <p>対局を中断してタイトルに戻りますか？</p>
-      <p class="pause-note">${icon('check')}進行状況は自動保存され、「続きから」で再開できます。</p>`,
+      <p>${P.ask}</p>
+      <p class="pause-note">${icon('check')}${P.saved}</p>`,
     actions: [
-      { label: 'タイトルへ', kind: 'ghost', onClick: () => { renderTitle(); } },
-      { label: '対局を続ける', kind: 'primary', autofocus: true },
+      { label: t().common.toTitle, kind: 'ghost', onClick: () => { renderTitle(); } },
+      { label: P.keep, kind: 'primary', autofocus: true },
     ],
   });
 }
 
 function showSettings(): void {
+  const S = t().settings;
   const body = document.createElement('div');
   body.className = 'settings';
   const seg = <T extends string>(name: string, opts: [T, string][], cur: T): string =>
@@ -1671,22 +1784,22 @@ function showSettings(): void {
       `<button type="button" role="radio" data-v="${v}" aria-checked="${v === cur}">${l}</button>`).join('')}</div>`;
   body.innerHTML = `
     <section class="set-card sound">
-      <h3>${icon('soundOn')}サウンド</h3>
-      <label class="row"><span>効果音</span><input type="checkbox" class="switch" data-k="sound" ${settings.sound ? 'checked' : ''}></label>
-      <label class="row"><span>音量</span><input type="range" min="0" max="100" step="5" data-k="volume" value="${Math.round(settings.volume * 100)}"></label>
+      <h3>${icon('soundOn')}${S.sound}</h3>
+      <label class="row"><span>${S.sfx}</span><input type="checkbox" class="switch" data-k="sound" ${settings.sound ? 'checked' : ''}></label>
+      <label class="row"><span>${S.volume}</span><input type="range" min="0" max="100" step="5" data-k="volume" value="${Math.round(settings.volume * 100)}"></label>
     </section>
     <section class="set-card disp">
-      <h3>${icon('eye')}表示</h3>
-      <div class="row"><span>アニメーション速度</span>${seg<AnimSpeed>('animSpeed', [['slow', 'ゆっくり'], ['normal', '標準'], ['fast', '速い']], settings.animSpeed)}</div>
-      <label class="row"><span>刻印表示<small>3Dの球に ○× を表示</small></span><input type="checkbox" class="switch" data-k="showSymbols" ${settings.showSymbols ? 'checked' : ''}></label>
-      <label class="row"><span>ヒント<small>操作の結果予告と成立ラインを表示</small></span><input type="checkbox" class="switch" data-k="showHints" ${settings.showHints ? 'checked' : ''}></label>
-      <label class="row"><span>展開表示<small>層の間隔を広げて内側を見やすく</small></span><input type="checkbox" class="switch" data-k="explode" ${settings.explode ? 'checked' : ''}></label>
+      <h3>${icon('eye')}${S.display}</h3>
+      <div class="row"><span>${S.anim}</span>${seg<AnimSpeed>('animSpeed', [['slow', S.slow], ['normal', S.normal], ['fast', S.fast]], settings.animSpeed)}</div>
+      <label class="row"><span>${S.symbols}<small>${S.symbolsSub}</small></span><input type="checkbox" class="switch" data-k="showSymbols" ${settings.showSymbols ? 'checked' : ''}></label>
+      <label class="row"><span>${S.hints}<small>${S.hintsSub}</small></span><input type="checkbox" class="switch" data-k="showHints" ${settings.showHints ? 'checked' : ''}></label>
+      <label class="row"><span>${S.explode}<small>${S.explodeSub}</small></span><input type="checkbox" class="switch" data-k="explode" ${settings.explode ? 'checked' : ''}></label>
     </section>
     <section class="set-card rules">
-      <h3>${icon('cube')}対局ルール <small>（次の新しいゲームから適用）</small></h3>
-      <div class="row"><span>先手<small>ふたりで対戦のとき</small></span>${seg<FirstPlayer>('firstPlayer', [['O', '〇 青'], ['X', '× 赤'], ['random', 'ランダム']], settings.firstPlayer)}</div>
-      <label class="row"><span>手数上限<small>到達すると引き分け</small></span>
-        <select data-k="turnLimit">${TURN_LIMITS.map(v => `<option value="${v ?? ''}" ${v === settings.turnLimit ? 'selected' : ''}>${v ? `${v}手` : 'なし'}</option>`).join('')}</select>
+      <h3>${icon('cube')}${S.rules} <small>${S.rulesSub}</small></h3>
+      <div class="row"><span>${S.first}<small>${S.firstSub}</small></span>${seg<FirstPlayer>('firstPlayer', [['O', S.blue], ['X', S.red], ['random', t().common.random]], settings.firstPlayer)}</div>
+      <label class="row"><span>${S.limit}<small>${S.limitSub}</small></span>
+        <select data-k="turnLimit">${TURN_LIMITS.map(v => `<option value="${v ?? ''}" ${v === settings.turnLimit ? 'selected' : ''}>${v ? S.limitN(v) : t().common.none}</option>`).join('')}</select>
       </label>
     </section>`;
 
@@ -1715,13 +1828,14 @@ function showSettings(): void {
   const sel = body.querySelector<HTMLSelectElement>('select[data-k="turnLimit"]');
   sel?.addEventListener('change', () => { setSetting('turnLimit', sel.value ? Number(sel.value) : null); sound.click(); });
 
-  openModal({ title: '設定', subtitle: 'SETTINGS', content: body, className: 'settings-modal', actions: [{ label: '閉じる', kind: 'primary' }] });
+  openModal({ title: S.title, subtitle: S.tag, content: body, className: 'settings-modal', actions: [{ label: t().common.close, kind: 'primary' }] });
 }
 
 // ═══════════════════════════════ Entry ═════════════════════════════════════
 
 export function initApp(el: HTMLElement): void {
   root = el;
+  setLang(settings.lang);
   applySettings();
   const unlock = (): void => sound.unlock();
   window.addEventListener('pointerdown', unlock, { capture: true });

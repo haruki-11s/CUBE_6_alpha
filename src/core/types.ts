@@ -1,3 +1,6 @@
+/** Display language of the text the game shows. */
+export type Lang = 'ja' | 'en';
+
 export type Mark = 'O' | 'X' | null;
 export type Player = 'O' | 'X';
 export type Axis = 'X' | 'Y' | 'Z';

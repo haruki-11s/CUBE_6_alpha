@@ -1,4 +1,4 @@
-import type { Player } from './types';
+import type { Lang, Player } from './types';
 
 /*
  * 持ち時間 (time control) as in online board games: each player has a main
@@ -53,9 +53,10 @@ export function fmtClock(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-export function presetLabel(p: ClockPreset): string {
-  if (p === 'off') return 'なし';
-  return `${CLOCK_PRESETS[p].mainMs / 60000}分＋秒読み${CLOCK_PRESETS[p].byoyomiMs / 1000}秒`;
+export function presetLabel(p: ClockPreset, lang: Lang = 'ja'): string {
+  if (p === 'off') return lang === 'en' ? 'None' : 'なし';
+  const min = CLOCK_PRESETS[p].mainMs / 60000, sec = CLOCK_PRESETS[p].byoyomiMs / 1000;
+  return lang === 'en' ? `${min} min + ${sec} s` : `${min}分＋秒読み${sec}秒`;
 }
 
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;

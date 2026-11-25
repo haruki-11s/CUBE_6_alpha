@@ -4,6 +4,7 @@ import { describeMove, shortMove, describeStep1, cellName, layerHint } from '../
 import type { LogEntry } from '../core/save';
 import { PLAYER_COLORS } from './theme';
 import { icon } from './icons';
+import { getLang, t } from './i18n';
 
 /** What a previewed cube move would do, from the mover's side. */
 export type Outcome = 'mate' | 'check' | 'escape' | 'notBroken' | 'self' | 'limit';
@@ -33,7 +34,7 @@ export interface ControlsView {
   phase: 'step1' | 'step1-move-from' | 'step2';
   selectedFrom: number | null;
   canPlace: boolean;
-  /** "配置" or "移動" — what step ① of this turn is / was. */
+  /** "配置" or "移動" ("Place" / "Move") — what step ① of this turn is / was. */
   step1Label: string;
   log: LogEntry[];
   resultText?: string;
@@ -43,7 +44,7 @@ export interface ControlsView {
   reviewing?: boolean;
   /** CPU games: there is a stronger level to go on to. */
   nextLevel?: boolean;
-  /** Display names ("PLAYER 1" / "あなた" / "CPU"). */
+  /** Display names ("PLAYER 1" / "あなた" or "You" / "CPU"). */
   names: Readonly<Record<Player, string>>;
   /** CPU games: the CPU's side, its strength label and whether it is acting now. */
   cpu: { side: Player; label: string; acting: boolean } | null;
@@ -52,13 +53,9 @@ export interface ControlsView {
 }
 
 const AXES: readonly Axis[] = ['X', 'Y', 'Z'];
-const OUTCOME_TEXT: Readonly<Record<Outcome, [string, string]>> = {
-  mate: ['win', '★ 詰み！ 相手はこの列を崩せません（勝利）'],
-  check: ['check', '◆ 王手！ 相手はこの列を崩す必要があります'],
-  escape: ['escape', '✓ 相手の列を崩せます'],
-  notBroken: ['self', '⚠ 相手の列が残ります（負け）'],
-  self: ['self', '⚠ 相手の列が揃います（自爆負け）'],
-  limit: ['draw', '＝ 手数上限に達して引き分け'],
+/** Style of each outcome line (the text is in the dictionaries). */
+const OUTCOME_CLASS: Readonly<Record<Outcome, string>> = {
+  mate: 'win', check: 'check', escape: 'escape', notBroken: 'self', self: 'self', limit: 'draw',
 };
 
 function div(cls: string, text?: string): HTMLDivElement {
@@ -121,7 +118,7 @@ export class Controls {
     const el = document.createElement('section');
     el.className = 'card info-card cpu-card';
     el.innerHTML = `<div class="cpu-think"><span class="cpu-orb" aria-hidden="true"></span>
-      <div><b>CPU が考えています</b><span class="think-dots"><i></i><i></i><i></i></span>
+      <div><b>${t().controls.cpuThinking}</b><span class="think-dots"><i></i><i></i><i></i></span>
       <small>${label}</small></div></div>`;
     return el;
   }
@@ -130,7 +127,7 @@ export class Controls {
     const el = document.createElement('section');
     el.className = 'card confirm-card cpu-move';
     el.innerHTML = `
-      <div class="sel-label empty">CPU が操作を選んでいます<span class="think-dots"><i></i><i></i><i></i></span></div>
+      <div class="sel-label empty">${t().controls.cpuChoosing}<span class="think-dots"><i></i><i></i><i></i></span></div>
       <div class="outcome" hidden></div>`;
     this.selLabel = el.querySelector<HTMLElement>('.sel-label');
     this.outcomeEl = el.querySelector<HTMLElement>('.outcome');
@@ -139,27 +136,28 @@ export class Controls {
 
   private step1Card(v: ControlsView): HTMLElement {
     const s = v.state;
+    const C = t().controls;
     const el = document.createElement('section');
     el.className = 'card info-card';
     let html = `<div class="card-title"><span class="step-no">1</span>${v.step1Label}</div>`;
     if (v.check) {
-      html += `<div class="check-note" role="alert"><b>王手！</b>${v.names[v.check.by]}の列が揃っています。①のあと、②の操作でこの列を崩してください。</div>`;
+      html += `<div class="check-note" role="alert"><b>${C.check}</b>${C.checkStep1(v.names[v.check.by])}</div>`;
     }
     if (v.canPlace) {
-      html += '<p class="lead">光っている<b>空きマス</b>を選んで駒を置きます。<br><small>3D・見取り図のどちらでも選べます。</small></p>';
+      html += `<p class="lead">${C.leadPlace}</p>`;
     } else if (v.selectedFrom === null) {
-      html += '<p class="lead">手駒を使い切りました。<b>動かす自分の駒</b>を選んでください。</p>';
+      html += `<p class="lead">${C.leadPickPiece}</p>`;
     } else {
-      html += `<p class="lead">移動先の<b>空きマス</b>を選んでください。</p>
-        <div class="sel-piece"><span>選択中 <b>${cellName(v.selectedFrom)}</b></span>
-        <button type="button" class="btn sm ghost" data-act="deselect">選び直す<kbd>Esc</kbd></button></div>`;
+      html += `<p class="lead">${C.leadPickTarget}</p>
+        <div class="sel-piece"><span>${C.selected} <b>${cellName(v.selectedFrom)}</b></span>
+        <button type="button" class="btn sm ghost" data-act="deselect">${C.reselect}<kbd>Esc</kbd></button></div>`;
     }
     if (s.lastCubeMove) {
       const lm = s.lastCubeMove;
-      html += `<div class="last-move" tabindex="0" role="note" aria-label="相手の直前の操作">
-        <div class="lm-row"><span class="lm-k">相手の直前の操作</span><span class="chip ax-${lm.axis.toLowerCase()}">${shortMove(lm)}</span></div>
-        <div class="lm-desc">${describeMove(lm)}</div>
-        <div class="lm-tip">${icon('eye')}ポイントすると3Dに表示</div>
+      html += `<div class="last-move" tabindex="0" role="note" aria-label="${C.lastMove}">
+        <div class="lm-row"><span class="lm-k">${C.lastMove}</span><span class="chip ax-${lm.axis.toLowerCase()}">${shortMove(lm)}</span></div>
+        <div class="lm-desc">${describeMove(lm, getLang())}</div>
+        <div class="lm-tip">${icon('eye')}${C.lastMoveTip}</div>
       </div>`;
     }
     el.innerHTML = html;
@@ -179,36 +177,39 @@ export class Controls {
   private opCard(v: ControlsView): HTMLElement {
     const el = document.createElement('section');
     el.className = 'card op-card';
-    el.innerHTML = '<div class="card-title"><span class="step-no">2</span>キューブ操作</div>';
+    const C = t().controls;
+    el.innerHTML = `<div class="card-title"><span class="step-no">2</span>${C.cubeTitle}</div>`;
     el.appendChild(this.opGrid());
     if (v.check) {
       const n = v.check.escapes;
-      el.querySelector('.card-title')?.insertAdjacentHTML('afterend', `<div class="check-note" role="alert"><b>王手！</b>${v.names[v.check.by]}の列を崩す操作を選んでください。${n !== null ? `<span class="check-n">崩せる操作 ${n}通り</span>` : ''}</div>`);
+      el.querySelector('.card-title')?.insertAdjacentHTML('afterend', `<div class="check-note" role="alert"><b>${C.check}</b>${C.checkStep2(v.names[v.check.by])}${n !== null ? `<span class="check-n">${C.escapes(n)}</span>` : ''}</div>`);
     }
     return el;
   }
 
   /** The 24 cube moves: 3 axes × (3 layers × 2 directions + 2 slides), with the legend. */
   private opGrid(): HTMLElement {
+    const C = t().controls;
+    const lang = getLang();
     const wrap = div('op-wrap');
     const grid = div('op-grid');
     grid.setAttribute('role', 'group');
-    grid.setAttribute('aria-label', 'キューブ操作の選択');
+    grid.setAttribute('aria-label', C.gridAria);
     grid.appendChild(div('op-corner'));
-    for (const a of AXES) grid.appendChild(div(`op-head ax-${a.toLowerCase()}`, `${a}軸`));
+    for (const a of AXES) grid.appendChild(div(`op-head ax-${a.toLowerCase()}`, C.axis(a)));
     for (const layer of [0, 1, 2] as const) {
-      grid.appendChild(div('op-row', `層${layer}`));
+      grid.appendChild(div('op-row', C.layer(layer)));
       for (const a of AXES) {
         const cell = div(`op-cell ax-${a.toLowerCase()}`);
-        cell.title = `${a}軸・層${layer}（${layerHint(a, layer)}）`;
+        cell.title = C.cellTip(a, layer, layerHint(a, layer, lang));
         cell.append(this.moveBtn(rot(a, layer, 'CCW')), this.moveBtn(rot(a, layer, 'CW')));
         grid.appendChild(cell);
       }
     }
-    grid.appendChild(div('op-row', '繰越'));
+    grid.appendChild(div('op-row', C.slideRow));
     for (const a of AXES) {
       const cell = div(`op-cell ax-${a.toLowerCase()}`);
-      cell.title = `${a}軸方向へ盤全体を1マスずらす`;
+      cell.title = C.slideTip(a);
       cell.append(
         this.moveBtn({ kind: 'slide', axis: a, dir: 'forward' }),
         this.moveBtn({ kind: 'slide', axis: a, dir: 'backward' }),
@@ -217,7 +218,7 @@ export class Controls {
     }
     wrap.appendChild(grid);
     wrap.insertAdjacentHTML('beforeend', `<div class="op-legend">
-      <span>${icon('rotCCW')}${icon('rotCW')}＋側から見た回転</span><span><b>−</b><b>＋</b>繰越の向き</span></div>`);
+      <span>${icon('rotCCW')}${icon('rotCW')}${C.legendRotate}</span><span><b>−</b><b>＋</b>${C.legendSlide}</span></div>`);
     return wrap;
   }
 
@@ -228,7 +229,7 @@ export class Controls {
     b.innerHTML = m.kind === 'rotate'
       ? icon(m.dir === 'CCW' ? 'rotCCW' : 'rotCW')
       : `<span class="op-sl">${m.dir === 'forward' ? '−' : '＋'}</span>`;
-    const desc = describeMove(m);
+    const desc = describeMove(m, getLang());
     b.title = desc;
     b.setAttribute('aria-label', desc);
     b.setAttribute('aria-pressed', 'false');
@@ -242,14 +243,15 @@ export class Controls {
   }
 
   private confirmCard(): HTMLElement {
+    const C = t().controls;
     const el = document.createElement('section');
     el.className = 'card confirm-card';
     el.innerHTML = `
-      <div class="sel-label empty">↑ 操作を選んでください</div>
+      <div class="sel-label empty">${C.pickMove}</div>
       <div class="outcome" hidden></div>
       <div class="confirm-row">
-        <button type="button" class="btn ok big" data-act="confirm">${icon('check')}確定<kbd>Enter</kbd></button>
-        <button type="button" class="btn ghost" data-act="cancel" title="①の配置／移動を取り消して、やり直します">${icon('undo')}取消<kbd>Esc</kbd></button>
+        <button type="button" class="btn ok big" data-act="confirm">${icon('check')}${C.confirm}<kbd>Enter</kbd></button>
+        <button type="button" class="btn ghost" data-act="cancel" title="${C.undoTip}">${icon('undo')}${C.undo}<kbd>Esc</kbd></button>
       </div>`;
     this.selLabel = el.querySelector<HTMLElement>('.sel-label');
     this.outcomeEl = el.querySelector<HTMLElement>('.outcome');
@@ -261,15 +263,16 @@ export class Controls {
   }
 
   private resultCard(v: ControlsView): HTMLElement {
+    const C = t().controls, common = t().common;
     const el = document.createElement('section');
     el.className = 'card result-card';
-    el.innerHTML = `<p class="result-lead">${v.resultText ?? '対局終了'}</p>
+    el.innerHTML = `<p class="result-lead">${v.resultText ?? C.gameOver}</p>
       <div class="col-btns">
-        <button type="button" class="btn primary" data-act="result">${icon('trophy')}結果を表示</button>
-        ${v.canReview ? `<button type="button" class="btn ok" data-act="review">${icon('eye')}盤面を確認する</button>` : ''}
-        <button type="button" class="btn" data-act="replay">${icon('refresh')}もう一度</button>
-        ${v.nextLevel ? `<button type="button" class="btn" data-act="next">${icon('next')}次のレベル</button>` : ''}
-        <button type="button" class="btn ghost" data-act="title">${icon('home')}タイトルへ</button>
+        <button type="button" class="btn primary" data-act="result">${icon('trophy')}${C.showResult}</button>
+        ${v.canReview ? `<button type="button" class="btn ok" data-act="review">${icon('eye')}${C.review}</button>` : ''}
+        <button type="button" class="btn" data-act="replay">${icon('refresh')}${common.replay}</button>
+        ${v.nextLevel ? `<button type="button" class="btn" data-act="next">${icon('next')}${common.nextLevel}</button>` : ''}
+        <button type="button" class="btn ghost" data-act="title">${icon('home')}${common.toTitle}</button>
       </div>`;
     el.querySelector('[data-act="result"]')?.addEventListener('click', () => this.emit({ type: 'showResult' }));
     el.querySelector('[data-act="review"]')?.addEventListener('click', () => this.emit({ type: 'review' }));
@@ -281,19 +284,20 @@ export class Controls {
 
   /** 「盤面を確認する」: preview any cube move on the final board; 「誤審の訂正」 plays on. */
   private reviewCard(): HTMLElement {
+    const C = t().controls;
     const el = document.createElement('section');
     el.className = 'card review-card';
-    el.innerHTML = `<div class="card-title">${icon('eye')}盤面を確認中</div>
-      <p class="lead">操作を選ぶと、その操作のあとの盤面を確認できます。<small>対局は進みません。</small></p>`;
+    el.innerHTML = `<div class="card-title">${icon('eye')}${C.reviewing}</div>
+      <p class="lead">${C.reviewLead}</p>`;
     el.appendChild(this.opGrid());
     el.insertAdjacentHTML('beforeend', `
-      <div class="sel-label empty">↑ 操作を選んでください</div>
+      <div class="sel-label empty">${C.pickMove}</div>
       <div class="outcome" hidden></div>
       <div class="misjudge">
-        <button type="button" class="btn ok" data-act="play-on">${icon('flag')}誤審の訂正</button>
-        <p>誤審である場合は、このボタンを押すことでゲームを続行できます。</p>
+        <button type="button" class="btn ok" data-act="play-on">${icon('flag')}${C.playOn}</button>
+        <p>${C.playOnNote}</p>
       </div>
-      <button type="button" class="btn ghost" data-act="result">${icon('trophy')}結果に戻る</button>`);
+      <button type="button" class="btn ghost" data-act="result">${icon('trophy')}${C.backToResult}</button>`);
     this.selLabel = el.querySelector<HTMLElement>('.sel-label');
     this.outcomeEl = el.querySelector<HTMLElement>('.outcome');
     el.querySelector('[data-act="play-on"]')?.addEventListener('click', () => this.emit({ type: 'playOn' }));
@@ -302,14 +306,15 @@ export class Controls {
   }
 
   private footCard(v: ControlsView): HTMLElement {
+    const C = t().controls;
     const el = document.createElement('section');
     el.className = 'card foot-card';
     const items = v.log.length
       ? v.log.map(e => this.logItem(e)).join('')
-      : '<li class="empty">まだ記録はありません</li>';
+      : `<li class="empty">${C.logEmpty}</li>`;
     el.innerHTML = `
       <details class="log"${this.logOpen ? ' open' : ''}>
-        <summary>${icon('list')}棋譜<span class="n">${v.log.length}</span></summary>
+        <summary>${icon('list')}${C.log}<span class="n">${v.log.length}</span></summary>
         <ol>${items}</ol>
       </details>`;
     const det = el.querySelector('details');
@@ -324,13 +329,14 @@ export class Controls {
   }
 
   private logItem(e: LogEntry): string {
+    const C = t().controls;
     const P = PLAYER_COLORS[e.player];
-    const who = this.cpuSide ? `<span class="lg-who">${e.player === this.cpuSide ? 'CPU' : 'あなた'}</span>` : '';
+    const who = this.cpuSide ? `<span class="lg-who">${e.player === this.cpuSide ? 'CPU' : t().common.you}</span>` : '';
     const res = e.result && e.result !== 'playing'
-      ? `<span class="lg-res">${e.result === 'draw' ? '引分' : '決着'}</span>` : '';
+      ? `<span class="lg-res">${e.result === 'draw' ? C.logDraw : C.logEnd}</span>` : '';
     const cube = e.cube ? `<span class="chip ax-${e.cube.axis.toLowerCase()}">${shortMove(e.cube)}</span>` : '';
     return `<li><span class="lg-n">${e.ply}</span><span class="lg-p ${e.player.toLowerCase()}">${P.glyph}</span>${who}`
-      + `<span class="lg-s">${describeStep1(e.step1)}</span>${cube}${res}</li>`;
+      + `<span class="lg-s">${describeStep1(e.step1, getLang())}</span>${cube}${res}</li>`;
   }
 
   // ── In-place updates ─────────────────────────────────────────────────────
@@ -346,19 +352,19 @@ export class Controls {
     if (!move) {
       if (this.cpuActing) return; // keep "CPU が操作を選んでいます…"
       L.className = 'sel-label empty';
-      L.textContent = '↑ 操作を選んでください';
+      L.textContent = t().controls.pickMove;
       O.hidden = true;
       return;
     }
     const isSel = !!this.selected && movesEqual(move, this.selected);
-    const tag = this.cpuActing ? 'CPU の操作' : isSel ? '選択中' : 'プレビュー';
+    const C = t().controls;
+    const tag = this.cpuActing ? C.tagCpu : isSel ? C.tagSelected : C.tagPreview;
     L.className = `sel-label ax-${move.axis.toLowerCase()}`;
-    L.innerHTML = `<span class="sel-tag">${tag}</span><span class="sel-desc">${describeMove(move)}</span>`;
+    L.innerHTML = `<span class="sel-tag">${tag}</span><span class="sel-desc">${describeMove(move, getLang())}</span>`;
     if (outcome) {
-      const [cls, text] = OUTCOME_TEXT[outcome];
       O.hidden = false;
-      O.className = `outcome ${cls}`;
-      O.textContent = text;
+      O.className = `outcome ${OUTCOME_CLASS[outcome]}`;
+      O.textContent = C.outcome[outcome];
     } else {
       O.hidden = true;
     }

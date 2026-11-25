@@ -6,6 +6,7 @@ import type { Line } from '../core/lines';
 import { ease, getAnimSpeed, tween } from './tween';
 import { glowTexture, ringTexture, symbolTexture } from './textures';
 import { AXIS_COLORS, PLAYER_COLORS } from './theme';
+import { t } from './i18n';
 
 type RotateMove = Extract<CubeMove, { kind: 'rotate' }>;
 type SlideMove = Extract<CubeMove, { kind: 'slide' }>;
@@ -203,7 +204,7 @@ export class Scene3D {
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'stage-canvas';
     this.canvas.setAttribute('role', 'img');
-    this.canvas.setAttribute('aria-label', '3D盤面。ドラッグで視点回転、ホイールまたはピンチでズーム。');
+    this.canvas.setAttribute('aria-label', t().game.canvasAria);
     host.prepend(this.canvas);
     this.labelLayer = document.createElement('div');
     this.labelLayer.className = 'label-layer';

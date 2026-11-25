@@ -3,6 +3,7 @@ import { toIndex, fromIndex } from '../core/board';
 import { AXIS_INDEX } from '../core/cube';
 import { cellName } from '../core/notation';
 import { AXIS_COLORS } from './theme';
+import { t } from './i18n';
 
 export interface SchematicState {
   board: Mark[];
@@ -17,8 +18,6 @@ export interface SchematicState {
   /** Move whose layer / slice should be outlined (candidate or opponent's last move). */
   guide: CubeMove | null;
 }
-
-const LAYER_NAMES = ['下層', '中層', '上層'];
 
 /**
  * 見取り図 — top view of the three horizontal layers (y = 2 / 1 / 0),
@@ -38,16 +37,17 @@ export class Schematic {
   private hover: number | null = null;
 
   constructor(container: HTMLElement) {
+    const S = t().schematic;
     container.innerHTML = `
       <div class="sch">
         <div class="sch-head">
-          <span class="sch-title">見取り図</span>
-          <span class="sch-badge" hidden>操作後</span>
+          <span class="sch-title">${S.title}</span>
+          <span class="sch-badge" hidden>${S.after}</span>
         </div>
         <div class="sch-legend">
           <span class="lg ax-x" data-ax="x">x →</span>
           <span class="lg ax-z" data-ax="z">z ↓</span>
-          <span class="sch-note">上から見た図</span>
+          <span class="sch-note">${S.fromAbove}</span>
         </div>
         <div class="sch-layers"></div>
       </div>`;
@@ -62,7 +62,7 @@ export class Schematic {
       layer.className = 'sch-layer';
       const label = document.createElement('div');
       label.className = 'sch-layer-label';
-      label.innerHTML = `<span class="ax-y">Y${y}</span><span>${LAYER_NAMES[y]}</span>`;
+      label.innerHTML = `<span class="ax-y">Y${y}</span><span>${S.layers[y]}</span>`;
       const tag = document.createElement('span');
       tag.className = 'sch-tag';
       label.appendChild(tag);
@@ -92,6 +92,7 @@ export class Schematic {
   }
 
   update(s: SchematicState): void {
+    const S = t().schematic;
     const shown = s.preview ? s.preview.after : s.board;
     const targets = new Set(s.targets);
     const win = new Set(s.win);
@@ -127,8 +128,8 @@ export class Schematic {
       cl.toggle('changed', !!s.preview && m !== s.board[i]);
       b.style.setProperty('--hl', hl);
       (b.firstElementChild as HTMLElement).textContent = m === 'O' ? '○' : m === 'X' ? '×' : '';
-      const state = m === 'O' ? '〇' : m === 'X' ? '×' : '空き';
-      b.setAttribute('aria-label', `${cellName(i)} ${state}${targets.has(i) ? '（選択可）' : ''}`);
+      const state = m === 'O' ? '〇' : m === 'X' ? '×' : S.empty;
+      b.setAttribute('aria-label', `${cellName(i)} ${state}${targets.has(i) ? S.selectable : ''}`);
     }
 
     // per-layer decoration (Y rotations rotate a whole grid; Y slides move grids up/down)
@@ -136,18 +137,18 @@ export class Schematic {
       const L = this.layers[y];
       L.style.setProperty('--hl', hl);
       let tag = '';
-      if (g?.axis === 'Y' && g.kind === 'rotate' && g.layer === y) tag = g.dir === 'CCW' ? '↺ 回転' : '↻ 回転';
-      if (g?.axis === 'Y' && g.kind === 'slide') tag = g.dir === 'forward' ? '↓ 1層下へ' : '↑ 1層上へ';
+      if (g?.axis === 'Y' && g.kind === 'rotate' && g.layer === y) tag = `${g.dir === 'CCW' ? '↺' : '↻'} ${S.rotate}`;
+      if (g?.axis === 'Y' && g.kind === 'slide') tag = g.dir === 'forward' ? S.down : S.up;
       L.classList.toggle('affected', !!tag);
       this.layerTags[y].textContent = tag;
     }
 
     // legend: direction of X / Z slides, highlight the axis in use
-    this.legendX.textContent = g?.axis === 'X' && g.kind === 'slide' ? (g.dir === 'forward' ? 'x ← 繰越' : 'x → 繰越') : 'x →';
-    this.legendZ.textContent = g?.axis === 'Z' && g.kind === 'slide' ? (g.dir === 'forward' ? 'z ↑ 繰越' : 'z ↓ 繰越') : 'z ↓';
+    this.legendX.textContent = g?.axis === 'X' && g.kind === 'slide' ? `x ${g.dir === 'forward' ? '←' : '→'} ${S.slide}` : 'x →';
+    this.legendZ.textContent = g?.axis === 'Z' && g.kind === 'slide' ? `z ${g.dir === 'forward' ? '↑' : '↓'} ${S.slide}` : 'z ↓';
     this.legendX.classList.toggle('on', g?.axis === 'X');
     this.legendZ.classList.toggle('on', g?.axis === 'Z');
-    this.note.textContent = s.preview ? '確定後の配置' : '上から見た図';
+    this.note.textContent = s.preview ? S.afterConfirm : S.fromAbove;
     this.badge.hidden = !s.preview;
   }
 
