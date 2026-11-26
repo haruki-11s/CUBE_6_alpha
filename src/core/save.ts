@@ -38,7 +38,7 @@ const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInt
 const isIdx = (v: unknown): v is number => isInt(v) && v >= 0 && v < 27;
 const isPlayer = (v: unknown): v is Player => v === 'O' || v === 'X';
 const STATUSES: readonly string[] = ['playing', 'win:O', 'win:X', 'draw'];
-const REASONS: readonly string[] = ['mate', 'notBroken', 'selfDestruct', 'turnLimit', 'timeout'];
+const REASONS: readonly string[] = ['mate', 'notBroken', 'selfDestruct', 'turnLimit', 'timeout', 'resign', 'disconnect'];
 const PHASES: readonly string[] = ['step1', 'step1-move-from', 'step2'];
 
 export function isCubeMove(v: unknown): v is CubeMove {

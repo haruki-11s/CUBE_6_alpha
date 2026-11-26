@@ -44,10 +44,15 @@ export interface ControlsView {
   reviewing?: boolean;
   /** CPU games: there is a stronger level to go on to. */
   nextLevel?: boolean;
-  /** Display names ("PLAYER 1" / "あなた" or "You" / "CPU"). */
+  /** Display names ("PLAYER 1" / "あなた" or "You" / "CPU" / an online opponent's name). */
   names: Readonly<Record<Player, string>>;
-  /** CPU games: the CPU's side, its strength label and whether it is acting now. */
-  cpu: { side: Player; label: string; acting: boolean } | null;
+  /**
+   * The other side in CPU and online games: its side, its label (the CPU's strength or the
+   * opponent's name) and whether it is acting now.
+   */
+  cpu: { side: Player; label: string; acting: boolean; online?: boolean } | null;
+  /** Online, after 詰み: the time left to check the board (kept up to date in place). */
+  reviewLeft?: string | null;
   /** The player to move is in check (王手): who checks, and (hints on) how many cube moves break it. */
   check: { by: Player; escapes: number | null } | null;
 }
@@ -84,6 +89,8 @@ export class Controls {
   private logOpen = false;
   private cpuActing = false;
   private cpuSide: Player | null = null;
+  /** The other side is a person playing online (not the CPU). */
+  private remote = false;
 
   constructor(private readonly container: HTMLElement) {}
 
@@ -97,10 +104,11 @@ export class Controls {
     this.confirmBtn = this.cancelBtn = null;
     this.cpuActing = !!v.cpu?.acting && s.status === 'playing';
     this.cpuSide = v.cpu?.side ?? null;
+    this.remote = !!v.cpu?.online;
     this.container.classList.toggle('cpu-acting', this.cpuActing);
 
     if (s.status !== 'playing') {
-      this.container.appendChild(v.reviewing ? this.reviewCard() : this.resultCard(v));
+      this.container.appendChild(v.reviewing ? this.reviewCard(v) : this.resultCard(v));
     } else if (v.phase === 'step2') {
       this.container.appendChild(this.opCard(v));
       this.container.appendChild(this.cpuActing ? this.cpuMoveCard() : this.confirmCard());
@@ -118,7 +126,7 @@ export class Controls {
     const el = document.createElement('section');
     el.className = 'card info-card cpu-card';
     el.innerHTML = `<div class="cpu-think"><span class="cpu-orb" aria-hidden="true"></span>
-      <div><b>${t().controls.cpuThinking}</b><span class="think-dots"><i></i><i></i><i></i></span>
+      <div><b>${this.remote ? t().online.oppThinking : t().controls.cpuThinking}</b><span class="think-dots"><i></i><i></i><i></i></span>
       <small>${label}</small></div></div>`;
     return el;
   }
@@ -127,7 +135,7 @@ export class Controls {
     const el = document.createElement('section');
     el.className = 'card confirm-card cpu-move';
     el.innerHTML = `
-      <div class="sel-label empty">${t().controls.cpuChoosing}<span class="think-dots"><i></i><i></i><i></i></span></div>
+      <div class="sel-label empty">${this.remote ? t().online.oppChoosing : t().controls.cpuChoosing}<span class="think-dots"><i></i><i></i><i></i></span></div>
       <div class="outcome" hidden></div>`;
     this.selLabel = el.querySelector<HTMLElement>('.sel-label');
     this.outcomeEl = el.querySelector<HTMLElement>('.outcome');
@@ -283,11 +291,12 @@ export class Controls {
   }
 
   /** 「盤面を確認する」: preview any cube move on the final board; 「誤審の訂正」 plays on. */
-  private reviewCard(): HTMLElement {
+  private reviewCard(v: ControlsView): HTMLElement {
     const C = t().controls;
     const el = document.createElement('section');
     el.className = 'card review-card';
-    el.innerHTML = `<div class="card-title">${icon('eye')}${C.reviewing}</div>
+    el.innerHTML = `<div class="card-title">${icon('eye')}${C.reviewing}${
+      v.reviewLeft ? `<span class="review-timer" data-review-left>${v.reviewLeft}</span>` : ''}</div>
       <p class="lead">${C.reviewLead}</p>`;
     el.appendChild(this.opGrid());
     el.insertAdjacentHTML('beforeend', `
@@ -331,7 +340,8 @@ export class Controls {
   private logItem(e: LogEntry): string {
     const C = t().controls;
     const P = PLAYER_COLORS[e.player];
-    const who = this.cpuSide ? `<span class="lg-who">${e.player === this.cpuSide ? 'CPU' : t().common.you}</span>` : '';
+    const them = this.remote ? t().online.opponent : 'CPU';
+    const who = this.cpuSide ? `<span class="lg-who">${e.player === this.cpuSide ? them : t().common.you}</span>` : '';
     const res = e.result && e.result !== 'playing'
       ? `<span class="lg-res">${e.result === 'draw' ? C.logDraw : C.logEnd}</span>` : '';
     const cube = e.cube ? `<span class="chip ax-${e.cube.axis.toLowerCase()}">${shortMove(e.cube)}</span>` : '';

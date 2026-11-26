@@ -45,7 +45,7 @@ describe('i18n', () => {
       for (const [path, text] of texts(d)) {
         if (text !== '') continue;
         expect(lang, path).toBe('en');
-        expect(path, path).toMatch(/(^|\.)(tag|[a-z]+Tag)$/);
+        expect(path, path).toMatch(/(^|\.)(tag|[a-z][a-zA-Z]*Tag)$/);
       }
     }
   });
@@ -67,6 +67,24 @@ describe('i18n', () => {
     const ja = dicts.ja.title;
     expect([ja.local, ja.online]).toEqual(['ローカル', 'インターネット']);
     expect([ja.cpu, ja.two, ja.random, ja.code]).toEqual(['対CPU', '2人で遊ぶ', 'ランダム対戦', '合言葉で遊ぶ']);
+  });
+
+  it('戦績 on the title holds the two rankings and the CPU records', () => {
+    const ja = dicts.ja.title;
+    expect([ja.records, ja.daily, ja.weekly, ja.cpuRecords]).toEqual(['戦績', 'デイリーランキング', 'ウィークリーランキング', 'CPU戦の戦績']);
+  });
+
+  it('the time to the next ranking reset reads in days once it is a day or more', () => {
+    expect(dicts.ja.ranking.resetIn(104, 2)).toBe('次の更新まで あと 4日8時間');
+    expect(dicts.ja.ranking.resetIn(8, 2)).toBe('次の更新まで あと 8時間2分');
+    expect(dicts.ja.ranking.resetIn(0, 45)).toBe('次の更新まで あと 45分');
+    expect(dicts.en.ranking.resetIn(104, 2)).toBe('Next reset in 4 d 8 h');
+    expect(dicts.en.ranking.resetIn(8, 2)).toBe('Next reset in 8 h 2 min');
+  });
+
+  it('the result of an online game gives no reason for resigning or a lost connection', () => {
+    // (the user asked to keep the result screen as it is: no new reason lines)
+    expect(JSON.stringify(dicts.ja.result)).not.toMatch(/降参|切断/);
   });
 
   it('the CPU setup no longer says the first player has the advantage', () => {

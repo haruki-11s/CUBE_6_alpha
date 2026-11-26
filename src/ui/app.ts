@@ -31,8 +31,24 @@ import { CpuClient } from './cpu';
 import {
   NORMAL_LEVELS, HIDDEN_LEVEL, levelLabel, loadProgress, recordResult, type GameResult,
 } from './cpuProfile';
+import {
+  formatRoomCode, isRoomCode, MATE_REVIEW_MS, normalizeRoomCode, ONLINE_CLOCK, rankingPeriod, RECONNECT_MS, timeUntil,
+  type RankingKind,
+} from '../core/online';
+import {
+  isAbort, NetError, online, previewConfig, type MatchFound, type NetErrorCode, type RankingData, type RankingRow,
+} from './online';
 
 type Phase = SavedPhase;
+
+/** An online game. It is never saved on this device: the server keeps it. */
+interface OnlineMatch {
+  mode: 'online';
+  found: MatchFound;
+  clock: ClockInfo;
+  undos: number;
+}
+type GameMatch = MatchInfo | OnlineMatch;
 
 interface GameUI {
   el: HTMLElement;
@@ -65,8 +81,8 @@ let selectedMove: CubeMove | null = null;
 let peekLast = false;
 let resultModal: ModalHandle | null = null;
 
-// ── Opponent: a second person on this device, or the CPU ─────────────────────
-let match: MatchInfo = { mode: 'local', undos: 0 };
+// ── Opponent: a second person on this device, the CPU, or someone online ───────
+let match: GameMatch = { mode: 'local', undos: 0 };
 let cpu: CpuClient | null = null;
 /** The CPU's turn is in progress (thinking or showing its move): the human can only watch / take back. */
 let cpuActing = false;
@@ -80,6 +96,19 @@ let lastBusyToast = 0;
 let reviewing = false;
 /** Removes the title screen's document listeners (its two menus and Esc). */
 let titleUiCleanup: (() => void) | null = null;
+
+// ── Online (a stand-in plays the opponent until the server exists) ──
+/** The strength the stand-in opponent plays at. */
+const STAND_IN_LEVEL: CpuLevel = 3;
+/** Online, after you were mated: when your time to check the board ends (performance.now()); 0 = none. */
+let reviewUntil = 0;
+/** Your opponent's connection dropped: when they lose unless it comes back; 0 = connected. */
+let oppDropUntil = 0;
+/** Your connection dropped: when you lose unless it comes back; 0 = connected. */
+let selfDropUntil = 0;
+/** "Your opponent is checking the board", while it is shown. */
+let waitModal: ModalHandle | null = null;
+const pause = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
 let elapsed = 0;
 let clockStart = 0;
@@ -105,6 +134,8 @@ function snapshot(): Snapshot {
 }
 
 function persist(): void {
+  // the server keeps online games; a saved local game stays as it was
+  if (match.mode === 'online') return;
   if (gs.status !== 'playing') { clearSave(); return; }
   // the clock in the save includes the time already spent on the turn in progress
   const m: MatchInfo = match.mode === 'cpu' && match.clock
@@ -144,14 +175,15 @@ function fmtTime(ms: number): string {
 
 // ── 持ち時間: main time, then 秒読み for every turn; running out loses ──────
 function gameClock(): ClockInfo | null {
-  return match.mode === 'cpu' ? match.clock : null;
+  return match.mode === 'local' ? null : match.clock;
 }
 function tcUsed(c: ClockInfo): number {
   return c.used + (tcRunning ? performance.now() - tcSince : 0);
 }
 /** Start / resume the clock of the player to move. */
 function tcStart(): void {
-  if (!gameClock() || !ui || tcRunning || tcHold || gs.status !== 'playing' || document.hidden) return;
+  // online, the clock keeps running while the page is in the background
+  if (!gameClock() || !ui || tcRunning || tcHold || gs.status !== 'playing' || (document.hidden && match.mode !== 'online')) return;
   tcSince = performance.now();
   tcRunning = true;
 }
@@ -201,14 +233,15 @@ function tcTick(): void {
   const c = gameClock();
   if (!c || !ui) return;
   renderClocks();
-  if (!tcRunning || gs.status !== 'playing' || match.mode !== 'cpu') return;
+  onlineTick();
+  if (!tcRunning || gs.status !== 'playing' || match.mode === 'local') return;
   const p = gs.current;
   const tt = turnTime(c, c.left[p], tcUsed(c));
   if (tt.phase === 'out') {
     if (!busy) timeOut(p); // an animation in progress finishes first
     return;
   }
-  if (tt.phase !== 'byoyomi' || p !== match.human) return;
+  if (tt.phase !== 'byoyomi' || p !== mySide()) return;
   if (!tcByoShown) {
     tcByoShown = true;
     if (c.left[p] > 0) {
@@ -257,8 +290,8 @@ function setSetting<K extends keyof Settings>(k: K, v: Settings[K]): void {
 
 // ═══════════════════════════════ Title screen ══════════════════════════════
 
-/** Which list the title menu shows: the two modes, or the choices inside one of them. */
-type TitleView = 'main' | 'local' | 'online';
+/** Which list the title menu shows: the main list, or the choices inside ローカル / インターネット / 戦績. */
+type TitleView = 'main' | 'local' | 'online' | 'records';
 let titleView: TitleView = 'main';
 
 /** A small English label beside a Japanese one ("SETTINGS"); the English UI has none. */
@@ -302,7 +335,6 @@ function mountTitleUI(settled: boolean): void {
       <button type="button" class="corner-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="corner-menu" aria-label="${T.menu}" title="${T.menu}">${icon('menu')}</button>
       <div class="corner-menu" id="corner-menu" role="menu" aria-label="${T.menu}" hidden>
         <button type="button" role="menuitem" data-act="settings">${icon('sliders')}<span>${T.settings}</span>${tag(T.settingsTag)}</button>
-        <button type="button" role="menuitem" data-act="records">${icon('chart')}<span>${T.records}</span>${tag(T.recordsTag)}</button>
         <div class="corner-sep" role="separator"></div>
         <button type="button" role="menuitem" data-act="exit" class="exit">${icon('power')}<span>${T.exit}</span>${tag(T.exitTag)}</button>
       </div>
@@ -321,7 +353,6 @@ function mountTitleUI(settled: boolean): void {
     setupDropdown(host.querySelector('.title-corner') as HTMLElement, b => {
       const act = b.dataset['act'];
       if (act === 'settings') showSettings();
-      else if (act === 'records') showRecords();
       else if (act === 'exit') confirmExit();
     }),
     setupDropdown(host.querySelector('.title-lang') as HTMLElement, b => {
@@ -343,13 +374,19 @@ function mountTitleUI(settled: boolean): void {
   };
 }
 
-/** The menu: ローカル / インターネット (with 続きから and ルール説明), or the two choices inside one. */
+/**
+ * The menu: ローカル / インターネット / (続きから) / 戦績 / ルール説明, or the choices inside
+ * ローカル, インターネット or 戦績.
+ */
 function renderTitleMenu(quick: boolean): void {
   const nav = root.querySelector<HTMLElement>('.title .menu');
   if (!nav) return;
-  const T = t().title;
+  const T = t().title, O = t().online;
   const btn = (act: string, ico: IconName, label: string, tagText: string, cls = ''): string =>
     `<button type="button" class="menu-btn${cls ? ` ${cls}` : ''}" data-act="${act}"><span>${icon(ico)}${label}</span>${tag(tagText)}</button>`;
+  const head = (label: string, tagText: string): string => `<div class="menu-head"><span>${label}</span>${tag(tagText)}</div>`;
+  // online play and the rankings are "coming soon" until the server exists
+  const live = online.available();
   let html: string;
   if (titleView === 'main') {
     const save = readSave();
@@ -360,14 +397,22 @@ function renderTitleMenu(quick: boolean): void {
     html = btn('local', 'device', T.local, T.localTag, 'primary')
       + btn('online', 'globe', T.online, T.onlineTag)
       + (save ? `<button type="button" class="menu-btn resume" data-act="resume"><span>${icon('resume')}${T.resume}</span><small>${resumeInfo}</small></button>` : '')
+      + btn('records', 'trophy', T.records, T.recordsTag)
       + btn('rules', 'help', T.rules, T.rulesTag);
   } else {
-    const local = titleView === 'local';
-    html = `<div class="menu-head"><span>${local ? T.local : T.online}</span>${tag(local ? T.localTag : T.onlineTag)}</div>`
-      + (local
-        ? btn('cpu', 'cpu', T.cpu, T.cpuTag, 'primary') + btn('two', 'users', T.two, T.twoTag)
-        : btn('random', 'shuffle', T.random, T.soonTag, 'soon') + btn('code', 'key', T.code, T.soonTag, 'soon'))
-      + `<button type="button" class="menu-back" data-act="back">${icon('back')}<span>${T.back}</span></button>`;
+    if (titleView === 'local') {
+      html = head(T.local, T.localTag) + btn('cpu', 'cpu', T.cpu, T.cpuTag, 'primary') + btn('two', 'users', T.two, T.twoTag);
+    } else if (titleView === 'online') {
+      html = head(T.online, T.onlineTag)
+        + btn('random', 'shuffle', T.random, live ? O.randomTag : T.soonTag, live ? 'primary' : 'soon')
+        + btn('code', 'key', T.code, live ? O.codeTag : T.soonTag, live ? '' : 'soon');
+    } else {
+      html = head(T.records, T.recordsTag)
+        + btn('daily', 'trophy', T.daily, live ? T.dailyTag : T.soonTag, live ? 'primary' : 'soon')
+        + btn('weekly', 'trophy', T.weekly, live ? T.weeklyTag : T.soonTag, live ? '' : 'soon')
+        + btn('cpuRecords', 'chart', T.cpuRecords, T.cpuRecordsTag);
+    }
+    html += `<button type="button" class="menu-back" data-act="back">${icon('back')}<span>${T.back}</span></button>`;
   }
   nav.dataset['view'] = titleView;
   nav.classList.toggle('quick', quick);
@@ -377,12 +422,13 @@ function renderTitleMenu(quick: boolean): void {
     b.addEventListener('click', () => {
       sound.click();
       const act = b.dataset['act'];
-      if (act === 'local' || act === 'online') openTitleView(act);
+      if (act === 'local' || act === 'online' || act === 'records') openTitleView(act);
       else if (act === 'back') openTitleView('main');
       else if (act === 'cpu') openCpuSetup();
       else if (act === 'two') requestNewGame({ mode: 'local', undos: 0 });
-      else if (act === 'random') showOnline(T.random);
-      else if (act === 'code') showOnline(T.code);
+      else if (act === 'random' || act === 'code') startOnline(act);
+      else if (act === 'daily' || act === 'weekly') openRanking(act);
+      else if (act === 'cpuRecords') showRecords();
       else if (act === 'resume') resumeGame();
       else if (act === 'rules') showRules();
     });
@@ -409,7 +455,7 @@ function changeLang(l: Lang): void {
   root.querySelector<HTMLElement>('.lang-toggle')?.focus({ preventScroll: true });
 }
 
-/** A button that opens a small menu (≡: 設定・戦績・EXIT, or the languages). Returns its cleanup. */
+/** A button that opens a small menu (≡: 設定・EXIT, or the languages). Returns its cleanup. */
 function setupDropdown(box: HTMLElement, onPick: (item: HTMLButtonElement) => void): () => void {
   const toggle = box.querySelector('.corner-toggle') as HTMLButtonElement;
   const menu = box.querySelector('.corner-menu') as HTMLElement;
@@ -488,6 +534,606 @@ function showRecords(): void {
       <p class="records-note">${R.note}</p>`,
     actions: [{ label: t().common.close, kind: 'primary' }],
   });
+}
+
+// ═══════════════════════════════ Online ════════════════════════════════════
+// Each step closes its window before the next one opens (windows are never stacked).
+
+const dots = '<span class="think-dots" aria-hidden="true"><i></i><i></i><i></i></span>';
+
+/** The buttons of a window are disabled while it waits; the last one shows what is going on. */
+function setActionsBusy(m: ModalHandle, on: boolean, label = ''): void {
+  const btns = [...m.el.querySelectorAll<HTMLButtonElement>('.modal-actions .btn')];
+  btns.forEach(b => { b.disabled = on; });
+  const main = btns[btns.length - 1];
+  if (!main) return;
+  if (on) {
+    main.dataset['label'] = main.dataset['label'] ?? main.textContent ?? '';
+    main.innerHTML = `${label}${dots}`;
+  } else if (main.dataset['label'] !== undefined) {
+    main.textContent = main.dataset['label'];
+  }
+}
+
+/** 利用規約 / プライバシーポリシー: links that say "coming soon" in place until the texts exist. */
+function docLinks(): string {
+  const O = t().online;
+  return `<div class="net-docs"><button type="button" class="link-btn" data-doc="terms">${O.terms}</button>`
+    + `<button type="button" class="link-btn" data-doc="privacy">${O.privacy}</button></div><p class="net-doc-note" hidden></p>`;
+}
+function wireDocLinks(host: HTMLElement): void {
+  const O = t().online;
+  const note = host.querySelector<HTMLElement>('.net-doc-note');
+  host.querySelectorAll<HTMLButtonElement>('[data-doc]').forEach(b => b.addEventListener('click', () => {
+    sound.click();
+    if (!note) return;
+    note.hidden = false;
+    note.textContent = O.docSoon(b.dataset['doc'] === 'privacy' ? O.privacy : O.terms);
+  }));
+}
+
+/** ランダム対戦 / 合言葉で遊ぶ, after the first-time welcome. */
+function startOnline(kind: 'random' | 'code'): void {
+  if (!online.available()) { showOnline(kind === 'random' ? t().title.random : t().title.code); return; }
+  const go = (): void => { if (kind === 'random') openMatching(); else openCodeMenu(); };
+  if (online.profile()) go();
+  else openWelcome(go);
+}
+
+/** The first time only: what online play is, the automatic name, and the terms to agree to. */
+function openWelcome(next: () => void): void {
+  const O = t().online;
+  const body = document.createElement('div');
+  body.className = 'net-welcome';
+  body.innerHTML = `
+    <p class="net-lead">${O.welcomeLead}</p>
+    <ul class="net-points">
+      <li>${icon('users')}<span>${O.welcomeName}</span></li>
+      <li>${icon('eye')}<span>${O.welcomePrivacy}</span></li>
+      <li>${icon('timer')}<span>${O.ruleClock}</span></li>
+    </ul>
+    ${docLinks()}`;
+  wireDocLinks(body);
+  let registering = false;
+  const m = openModal({
+    title: O.welcomeTitle, subtitle: O.welcomeTag, content: body, className: 'net-modal',
+    actions: [
+      { label: t().title.back, kind: 'ghost' },
+      {
+        label: O.agree, kind: 'primary', onClick: () => {
+          if (registering) return false;
+          registering = true;
+          setActionsBusy(m, true, O.registering);
+          online.register().then(
+            () => { m.close(); next(); },
+            e => { m.close(); showNetError(e, () => openWelcome(next)); },
+          );
+          return false;
+        },
+      },
+    ],
+  });
+}
+
+/** Online play cannot go on: no connection, paused for now, or this page is out of date. */
+function showNetError(e: unknown, retry?: () => void): void {
+  if (isAbort(e)) return;
+  const O = t().online;
+  const err = e instanceof NetError ? e : new NetError('offline');
+  if (err.code === 'outdated') {
+    openModal({
+      title: O.outdatedTitle, content: `<p>${O.outdated}</p>`,
+      actions: [
+        { label: t().common.close, kind: 'ghost' },
+        { label: O.reload, kind: 'primary', onClick: () => { location.reload(); } },
+      ],
+    });
+    return;
+  }
+  if (err.code === 'paused') {
+    const at = err.resumeAt ? new Date(err.resumeAt).toLocaleTimeString(getLang(), { hour: 'numeric', minute: '2-digit' }) : '';
+    openModal({ title: O.pausedTitle, content: `<p>${O.paused(at)}</p>`, actions: [{ label: t().common.close, kind: 'primary' }] });
+    return;
+  }
+  const actions: ModalAction[] = [{ label: t().title.back, kind: 'ghost' }];
+  if (retry) actions.push({ label: O.retry, kind: 'primary', onClick: () => { setTimeout(retry, 0); } });
+  openModal({ title: O.offlineTitle, content: `<p>${O.offline}</p>`, actions });
+}
+
+/** ランダム対戦: looking for an opponent (ranked). */
+function openMatching(): void {
+  const O = t().online;
+  const ctrl = new AbortController();
+  const body = document.createElement('div');
+  body.className = 'net-search';
+  body.innerHTML = `
+    <div class="net-radar" aria-hidden="true"><i></i><i></i><i></i><span>${icon('shuffle')}</span></div>
+    <p class="net-status" role="status">${O.searching}${dots}</p>
+    <p class="net-time" data-elapsed>0:00</p>
+    <div class="net-chips"><span>${icon('timer')}${O.ruleClock}</span><span class="ranked">${icon('trophy')}${O.ranked}</span></div>
+    <p class="net-me">${O.yourName(online.profile()?.name ?? '')}</p>`;
+  const t0 = performance.now();
+  const timeEl = body.querySelector<HTMLElement>('[data-elapsed]');
+  const tick = window.setInterval(() => { if (timeEl) timeEl.textContent = fmtTime(performance.now() - t0); }, 250);
+  const m = openModal({
+    title: O.randomTitle, subtitle: O.randomTag, content: body, className: 'net-modal',
+    actions: [{ label: O.stop, kind: 'ghost' }],
+    onClose: () => { window.clearInterval(tick); ctrl.abort(); },
+  });
+  online.findRandom(ctrl.signal).then(
+    found => { m.close(); announceMatch(found); },
+    e => { if (isAbort(e)) return; m.close(); showNetError(e, openMatching); },
+  );
+}
+
+/** 合言葉で遊ぶ: make a code, or enter one. */
+function openCodeMenu(): void {
+  const O = t().online;
+  const body = document.createElement('div');
+  body.className = 'net-code-menu';
+  body.innerHTML = `
+    <button type="button" class="code-choice primary" data-act="create">${icon('key')}<span><b>${O.codeCreate}</b><small>${O.codeCreateSub}</small></span></button>
+    <button type="button" class="code-choice" data-act="enter">${icon('keypad')}<span><b>${O.codeEnter}</b><small>${O.codeEnterSub}</small></span></button>
+    <p class="net-note">${icon('trophy')}${O.codeNote}</p>`;
+  const m = openModal({
+    title: O.codeTitle, subtitle: O.codeTag, content: body, className: 'net-modal',
+    actions: [{ label: t().title.back, kind: 'ghost' }],
+  });
+  body.querySelectorAll<HTMLButtonElement>('.code-choice').forEach(b => {
+    b.addEventListener('pointerenter', () => sound.hover());
+    b.addEventListener('click', () => {
+      sound.click();
+      m.close();
+      if (b.dataset['act'] === 'create') openCodeCreate();
+      else openCodeJoin();
+    });
+  });
+}
+
+/** 合言葉を作る: a 6-digit number to pass on; the game starts when the other player enters it. */
+function openCodeCreate(): void {
+  const O = t().online;
+  const ctrl = new AbortController();
+  const body = document.createElement('div');
+  body.className = 'net-code';
+  body.innerHTML = `
+    <p class="net-lead">${O.codeShowLead}</p>
+    <div class="code-show"><span class="code-big" data-code>– – –</span>
+      <button type="button" class="btn sm" data-act="copy" disabled>${icon('copy')}${O.copy}</button></div>
+    <p class="net-status" role="status">${O.waiting}${dots}</p>
+    <p class="net-expire" data-expire>&nbsp;</p>
+    <p class="net-note">${icon('trophy')}${O.unranked}</p>`;
+  let tick = 0;
+  const m = openModal({
+    title: O.codeCreate, subtitle: O.codeTag, content: body, className: 'net-modal',
+    actions: [{ label: O.stop, kind: 'ghost' }],
+    onClose: () => { window.clearInterval(tick); ctrl.abort(); },
+  });
+  const codeEl = body.querySelector<HTMLElement>('[data-code]');
+  const expEl = body.querySelector<HTMLElement>('[data-expire]');
+  const copyBtn = body.querySelector<HTMLButtonElement>('[data-act="copy"]');
+  online.createRoom(ctrl.signal)
+    .then(room => {
+      if (codeEl) codeEl.textContent = formatRoomCode(room.code);
+      if (copyBtn) {
+        copyBtn.disabled = false;
+        copyBtn.addEventListener('click', () => {
+          sound.click();
+          void navigator.clipboard?.writeText(room.code).then(() => { copyBtn.innerHTML = `${icon('check')}${O.copied}`; }, () => undefined);
+        });
+      }
+      const upd = (): void => { if (expEl) expEl.textContent = O.codeExpires(fmtClock(room.expiresAt - Date.now())); };
+      upd();
+      tick = window.setInterval(upd, 500);
+      return online.waitRoom(room.code, room.expiresAt, ctrl.signal);
+    })
+    .then(
+      found => {
+        m.close();
+        if (found) { announceMatch(found); return; }
+        openModal({ title: O.codeCreate, content: `<p>${O.codeExpired}</p>`, actions: [{ label: t().common.close, kind: 'primary' }] });
+      },
+      e => { if (isAbort(e)) return; m.close(); showNetError(e, openCodeCreate); },
+    );
+}
+
+/** 合言葉を入れる: the number the other player made. */
+function openCodeJoin(): void {
+  const O = t().online;
+  let ctrl: AbortController | null = null;
+  let joining = false;
+  const body = document.createElement('div');
+  body.className = 'net-code';
+  body.innerHTML = `
+    <label class="code-label" for="code-in">${O.codeInputLabel}</label>
+    <input id="code-in" class="code-input" type="text" inputmode="numeric" autocomplete="off" autocapitalize="off"
+      spellcheck="false" maxlength="9" placeholder="000 000" aria-describedby="code-err">
+    <p class="code-err" id="code-err" role="alert"></p>
+    <p class="net-note">${icon('trophy')}${O.unranked}</p>`;
+  const input = body.querySelector('input') as HTMLInputElement;
+  const err = body.querySelector('.code-err') as HTMLElement;
+  const m = openModal({
+    title: O.codeEnter, subtitle: O.codeTag, content: body, className: 'net-modal',
+    actions: [
+      { label: t().title.back, kind: 'ghost' },
+      { label: O.codeStart, kind: 'primary', onClick: () => { submit(); return false; } },
+    ],
+    onClose: () => ctrl?.abort(),
+  });
+  const startBtn = [...m.el.querySelectorAll<HTMLButtonElement>('.modal-actions .btn')].pop();
+  const sync = (): void => { if (startBtn) startBtn.disabled = joining || !isRoomCode(normalizeRoomCode(input.value)); };
+  input.addEventListener('input', () => { err.textContent = ''; sync(); });
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  sync();
+  setTimeout(() => input.focus({ preventScroll: true }), 60);
+
+  function submit(): void {
+    if (joining) return;
+    const code = normalizeRoomCode(input.value);
+    if (!isRoomCode(code)) { err.textContent = O.codeInvalid; sound.invalid(); return; }
+    joining = true;
+    input.disabled = true;
+    setActionsBusy(m, true, O.joining);
+    ctrl = new AbortController();
+    online.joinRoom(code, ctrl.signal).then(
+      found => {
+        if (found) { m.close(); announceMatch(found); return; }
+        joining = false;
+        input.disabled = false;
+        setActionsBusy(m, false);
+        sync();
+        err.textContent = O.codeNotFound;
+        sound.invalid();
+        input.focus();
+      },
+      e => { if (isAbort(e)) return; m.close(); showNetError(e, openCodeJoin); },
+    );
+  }
+}
+
+/** The opponent is found: who plays 〇 (先手) and × (後手), then the game starts by itself. */
+function announceMatch(found: MatchFound): void {
+  const O = t().online;
+  const card = (p: Player): string => {
+    const mine = p === found.me;
+    return `<div class="vs-card ${p.toLowerCase()}${mine ? ' me' : ''}">
+      <span class="vs-chip">${PLAYER_COLORS[p].glyph}</span>
+      <b class="vs-name">${mine ? t().common.you : found.opponent}</b>
+      <small>${mine ? online.profile()?.name ?? '' : '&nbsp;'}</small>
+      <span class="vs-order">${p === 'O' ? O.first : O.second}</span>
+    </div>`;
+  };
+  let n = 3;
+  const body = document.createElement('div');
+  body.className = 'net-found';
+  body.innerHTML = `
+    <div class="vs">${card('O')}<span class="vs-mid">VS</span>${card('X')}</div>
+    <div class="net-chips"><span>${icon('timer')}${O.ruleClock}</span>${found.kind === 'random'
+      ? `<span class="ranked">${icon('trophy')}${O.ranked}</span>`
+      : `<span>${icon('key')}${formatRoomCode(found.code ?? '')}</span>`}</div>
+    <p class="net-countdown" data-count>${O.startsIn(n)}</p>`;
+  const m = openModal({ title: O.foundTitle, subtitle: O.foundTag, content: body, className: 'net-modal found-modal', closable: false });
+  const countEl = body.querySelector<HTMLElement>('[data-count]');
+  const timer = window.setInterval(() => {
+    n--;
+    if (n > 0) {
+      if (countEl) countEl.textContent = O.startsIn(n);
+      sound.tick(false);
+      return;
+    }
+    window.clearInterval(timer);
+    m.close();
+    startGame({ mode: 'online', found, clock: newClock(ONLINE_CLOCK), undos: 0 });
+  }, 1000);
+}
+
+/** 戦績 → デイリー / ウィークリー: the top 100 by wins in random matches, and your own place. */
+function openRanking(kind: RankingKind): void {
+  const R = t().ranking;
+  if (!online.available()) {
+    openModal({ title: R.title, subtitle: R.tag, content: t().online.rankingSoon, actions: [{ label: t().common.close, kind: 'primary' }] });
+    return;
+  }
+  let cur = kind;
+  let seq = 0;
+  let tick = 0;
+  const body = document.createElement('div');
+  body.className = 'ranking';
+  body.innerHTML = `
+    <div class="seg full rank-kind" role="radiogroup" aria-label="${R.kindAria}">
+      ${(['daily', 'weekly'] as const).map(k => `<button type="button" role="radio" data-k="${k}" aria-checked="${k === cur}">${R[k]}</button>`).join('')}
+    </div>
+    <div class="rank-meta"><span data-period>&nbsp;</span><span class="rank-reset" data-reset></span></div>
+    <div class="rank-body" data-body></div>
+    <div class="rank-mine" data-mine></div>
+    <p class="rank-note">${R.note}</p>`;
+  const periodEl = body.querySelector('[data-period]') as HTMLElement;
+  const resetEl = body.querySelector('[data-reset]') as HTMLElement;
+  const listEl = body.querySelector('[data-body]') as HTMLElement;
+  const mineEl = body.querySelector('[data-mine]') as HTMLElement;
+  const cells = (rank: number, name: string, wins: number): string =>
+    `<span class="rank-no">${R.rankN(rank)}</span><span class="rank-name">${name}</span><span class="rank-wins">${R.winsN(wins)}</span>`;
+  const row = (r: RankingRow): string =>
+    `<li class="rank-row${r.me ? ' me' : ''}${r.rank <= 3 ? ` top top${r.rank}` : ''}">${cells(r.rank, r.me ? `${r.name}<small>${R.you}</small>` : r.name, r.wins)}</li>`;
+  const render = (d: RankingData): void => {
+    const fmt = new Intl.DateTimeFormat(getLang(), { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    periodEl.textContent = R.period(fmt.format(d.start), fmt.format(d.end));
+    const upd = (): void => { const left = timeUntil(d.end, Date.now()); resetEl.textContent = R.resetIn(left.h, left.m); };
+    upd();
+    window.clearInterval(tick);
+    tick = window.setInterval(upd, 15_000);
+    listEl.innerHTML = d.rows.length ? `<ol class="rank-list">${d.rows.map(row).join('')}</ol>` : `<p class="rank-empty">${R.none}</p>`;
+    const p = online.profile();
+    mineEl.innerHTML = d.mine && p
+      ? `<div class="rank-row me">${cells(d.mine.rank, `${p.name}<small>${R.you}</small>`, d.mine.wins)}</div>`
+      : `<p class="rank-none">${R.none}</p>`;
+    // your own row, when it is in the list, is scrolled into view
+    const list = listEl.querySelector<HTMLElement>('.rank-list');
+    const meRow = list?.querySelector<HTMLElement>('.rank-row.me');
+    if (list && meRow) list.scrollTop = Math.max(0, meRow.offsetTop - list.clientHeight / 2);
+  };
+  const load = (): void => {
+    const my = ++seq;
+    listEl.innerHTML = `<p class="rank-loading">${R.loading}${dots}</p>`;
+    mineEl.innerHTML = '';
+    online.ranking(cur).then(
+      d => { if (my === seq) render(d); },
+      () => {
+        if (my !== seq) return;
+        listEl.innerHTML = `<div class="rank-fail"><p>${R.failed}</p><button type="button" class="btn sm" data-act="retry">${icon('refresh')}${R.retry}</button></div>`;
+        listEl.querySelector('[data-act="retry"]')?.addEventListener('click', () => { sound.click(); load(); });
+      },
+    );
+  };
+  body.querySelectorAll<HTMLButtonElement>('.rank-kind button').forEach(b => {
+    b.addEventListener('click', () => {
+      const k = b.dataset['k'] as RankingKind;
+      if (k === cur) return;
+      cur = k;
+      body.querySelectorAll('.rank-kind button').forEach(x => x.setAttribute('aria-checked', String(x === b)));
+      sound.click();
+      load();
+    });
+  });
+  openModal({
+    title: R.title, subtitle: R.tag, content: body, className: 'ranking-modal',
+    actions: [{ label: t().common.close, kind: 'primary' }],
+    onClose: () => { window.clearInterval(tick); seq++; },
+  });
+  load();
+}
+
+/** もう一度 after an online game: a new random opponent, or a rematch with the same one (合言葉). */
+function onlineAgain(): void {
+  if (match.mode !== 'online') return;
+  const found = match.found;
+  if (found.kind === 'random') openMatching();
+  else requestRematch(found);
+}
+
+function requestRematch(prev: MatchFound): void {
+  const O = t().online;
+  const ctrl = new AbortController();
+  const m = openModal({
+    title: O.rematchTitle, subtitle: O.rematchTag, className: 'net-modal',
+    content: `<div class="net-wait"><span class="cpu-orb" aria-hidden="true"></span><div><b>${O.rematchWaiting}</b>${dots}<small>${prev.opponent}</small></div></div>`,
+    actions: [{ label: O.stop, kind: 'ghost' }],
+    onClose: () => ctrl.abort(),
+  });
+  online.rematch(prev, ctrl.signal).then(
+    found => {
+      m.close();
+      if (found) { announceMatch(found); return; }
+      openModal({
+        title: O.rematchTitle, content: `<p>${O.rematchLeft}</p>`,
+        actions: [
+          { label: t().common.toTitle, kind: 'ghost', onClick: () => { renderTitle(); } },
+          { label: t().common.close, kind: 'primary' },
+        ],
+      });
+    },
+    e => { if (isAbort(e)) return; m.close(); showNetError(e, () => requestRematch(prev)); },
+  );
+}
+
+/** 降参: confirm, then the game is lost. */
+function confirmResign(): void {
+  const O = t().online;
+  openModal({
+    title: O.resign, subtitle: O.resignTag,
+    content: `<p>${O.resignAsk}</p>`,
+    actions: [
+      { label: O.keepPlaying, kind: 'primary', autofocus: true },
+      {
+        label: O.resignYes, kind: 'danger', onClick: () => {
+          const me = mySide();
+          if (me) setTimeout(() => endOnline(me, 'resign'), 0);
+        },
+      },
+    ],
+  });
+}
+
+/** An online game ends without a move: 降参, or a connection that did not come back. */
+function endOnline(loser: Player, reason: 'resign' | 'disconnect'): void {
+  if (!ui || gs.status !== 'playing' || match.mode !== 'online') return;
+  // an animation in progress finishes first: it would otherwise write over the result
+  if (busy) { setTimeout(() => endOnline(loser, reason), 100); return; }
+  cancelCpu();
+  tcPause();
+  oppDropUntil = 0;
+  selfDropUntil = 0;
+  renderNetState();
+  gs = { ...gs, status: `win:${other(loser)}`, winReason: reason };
+  if (phase === 'step1-move-from') phase = 'step1';
+  selectedFrom = null;
+  selectedMove = null;
+  hoverMove = null;
+  void finishGame();
+}
+
+/** A connection dropped (or came back). The clocks keep running; 60 s without it loses the game. */
+function setDrop(who: 'opp' | 'self', on: boolean): void {
+  if (!ui || match.mode !== 'online' || gs.status !== 'playing') return;
+  const until = on ? performance.now() + RECONNECT_MS : 0;
+  if (who === 'opp') oppDropUntil = until;
+  else selfDropUntil = until;
+  renderNetState();
+  if (!on) maybeStartCpu();
+}
+
+/** The banner (your opponent dropped) and the cover (you dropped), with their countdowns. */
+function renderNetState(): void {
+  if (!ui) return;
+  const O = t().online;
+  const now = performance.now();
+  const banner = ui.el.querySelector<HTMLElement>('#net-banner');
+  if (banner) {
+    banner.hidden = !oppDropUntil;
+    if (oppDropUntil) {
+      const text = O.oppDropped(fmtClock(oppDropUntil - now));
+      const span = banner.querySelector('span');
+      if (!span) banner.innerHTML = `${icon('wifiOff')}<span>${text}</span>`;
+      else if (span.textContent !== text) span.textContent = text;
+    }
+  }
+  ui.el.classList.toggle('net-alert', !!oppDropUntil);
+  const cover = ui.el.querySelector<HTMLElement>('#net-cover');
+  if (cover) {
+    cover.hidden = !selfDropUntil;
+    if (selfDropUntil) {
+      const text = O.reconnecting(fmtClock(selfDropUntil - now));
+      const left = cover.querySelector<HTMLElement>('[data-left]');
+      if (!left) {
+        cover.innerHTML = `<div class="net-cover-card" role="alert"><span class="net-spin" aria-hidden="true"></span>
+          <b>${icon('wifiOff')}${O.selfDropped}</b><span data-left>${text}</span></div>`;
+      } else if (left.textContent !== text) left.textContent = text;
+    }
+  }
+}
+
+/** Online countdowns, called with the clocks: dropped connections, and the time to check the board after 詰み. */
+function onlineTick(): void {
+  if (!ui || match.mode !== 'online') return;
+  const now = performance.now();
+  if (oppDropUntil || selfDropUntil) {
+    renderNetState();
+    const me = mySide();
+    if (me && gs.status === 'playing' && !busy) {
+      if (selfDropUntil && now >= selfDropUntil) endOnline(me, 'disconnect');
+      else if (oppDropUntil && now >= oppDropUntil) endOnline(other(me), 'disconnect');
+    }
+  }
+  if (reviewUntil) {
+    const text = reviewLeftText();
+    document.querySelectorAll<HTMLElement>('[data-review-left]').forEach(el => { if (el.textContent !== text) el.textContent = text; });
+    if (now >= reviewUntil && gs.status !== 'playing' && !busy) {
+      // the time to check the board is over: the result is final
+      reviewUntil = 0;
+      reviewing = false;
+      selectedMove = null;
+      showResult();
+    }
+  }
+}
+
+function reviewLeftText(): string {
+  return t().online.reviewLeft(Math.max(0, Math.ceil((reviewUntil - performance.now()) / 1000)));
+}
+
+/** Online: you mated your opponent, who may check the board for up to 30 s (the stand-in takes a few). */
+async function waitForOpponentReview(u: GameUI): Promise<void> {
+  const O = t().online;
+  const start = performance.now();
+  const until = start + MATE_REVIEW_MS;
+  const accepted = start + 2500 + Math.random() * 3500;
+  waitModal = openModal({
+    content: `<div class="net-wait"><span class="cpu-orb" aria-hidden="true"></span><div><b>${O.oppReviewing}</b>${dots}
+      <small data-opp-review>${O.oppReviewLeft(fmtClock(MATE_REVIEW_MS))}</small></div></div>`,
+    className: 'net-modal wait-modal', closable: false,
+  });
+  while (ui === u && performance.now() < Math.min(until, accepted)) {
+    const el = waitModal?.el.querySelector<HTMLElement>('[data-opp-review]');
+    if (el) el.textContent = O.oppReviewLeft(fmtClock(until - performance.now()));
+    await pause(200);
+  }
+  waitModal?.close();
+  waitModal = null;
+}
+
+/** The stand-in waits while a connection is down (a real opponent's moves would arrive once it is back). */
+async function untilConnected(alive: () => boolean): Promise<void> {
+  while (alive() && (oppDropUntil || selfDropUntil)) await pause(200);
+}
+
+/** 設定 → ネット対戦: your name, the terms, and deleting your online data. */
+function onlineSettingsHTML(): string {
+  const O = t().online;
+  const p = online.profile();
+  return `<section class="set-card online">
+      <h3>${icon('globe')}${O.settingsHead}</h3>
+      <div class="row"><span>${O.myName}${p ? '' : `<small>${O.noNameSub}</small>`}</span><b class="net-name">${p ? p.name : O.noName}</b></div>
+      <div class="row docs-row"><span>${O.docs}</span>${docLinks()}</div>
+      <div class="row"><span>${O.deleteData}<small>${O.deleteSub}</small></span>
+        <button type="button" class="btn sm danger" data-act="delete-online"${p ? '' : ' disabled'}>${O.deleteYes}</button></div>
+    </section>`;
+}
+
+/** Deleting asks first, in a window of its own; settings open again afterwards. */
+function confirmDeleteOnline(): void {
+  const O = t().online;
+  let deleting = false;
+  const m = openModal({
+    title: O.deleteTitle, content: `<p>${O.deleteAsk}</p>`,
+    actions: [
+      { label: t().common.cancel, kind: 'ghost', autofocus: true, onClick: () => { setTimeout(showSettings, 0); } },
+      {
+        label: O.deleteYes, kind: 'danger', onClick: () => {
+          if (deleting) return false;
+          deleting = true;
+          setActionsBusy(m, true, O.deleteYes);
+          online.deleteData().then(
+            () => { m.close(); showSettings(O.deleted); },
+            e => { m.close(); showNetError(e, confirmDeleteOnline); },
+          );
+          return false;
+        },
+      },
+    ],
+  });
+}
+
+/** Development builds: knobs for trying the online screens without a server. */
+function devHooks(): void {
+  if (!import.meta.env.DEV) return;
+  (window as unknown as { __cube6: unknown }).__cube6 = {
+    net: previewConfig,
+    dropOpponent: (on = true): void => setDrop('opp', on),
+    dropSelf: (on = true): void => setDrop('self', on),
+    /** Your opponent presses 降参. */
+    oppResign: (): void => {
+      const me = mySide();
+      if (me) endOnline(other(me), 'resign');
+    },
+    netError: (code: NetErrorCode): void =>
+      showNetError(new NetError(code, code === 'paused' ? rankingPeriod('daily', Date.now()).end : null), () => undefined),
+    /** Puts a saved position (the cube6-save format) into the online game in progress. */
+    loadPosition: (raw: unknown): boolean => {
+      const s = parseSave(raw);
+      if (!s || !ui || match.mode !== 'online' || busy) return false;
+      cancelCpu();
+      gs = s.gameState;
+      phase = s.phase;
+      selectedFrom = s.selectedFrom;
+      lastMoved = s.lastMoved;
+      log = s.log;
+      history = [];
+      selectedMove = null;
+      hoverMove = null;
+      refresh();
+      return true;
+    },
+  };
 }
 
 function confirmExit(): void {
@@ -673,19 +1319,23 @@ function openCpuSetup(): void {
   });
 }
 
-function startGame(m: MatchInfo = match): void {
+function startGame(m: GameMatch = match): void {
   tcPause(); // (charges nothing: the old game's clock is already stopped)
   // a rematch keeps the time control but starts from full clocks
-  match = m.mode === 'cpu' ? { ...m, undos: 0, clock: m.clock ? newClock(m.clock) : null } : { mode: 'local', undos: 0 };
+  if (m.mode === 'online') match = { ...m, undos: 0, clock: newClock(m.clock) };
+  else match = m.mode === 'cpu' ? { ...m, undos: 0, clock: m.clock ? newClock(m.clock) : null } : { mode: 'local', undos: 0 };
   let first: Player;
   if (match.mode === 'cpu') {
     const o = settings.cpuOrder;
     const humanFirst = o === 'human' || (o === 'random' && Math.random() < 0.5);
     first = humanFirst ? match.human : other(match.human);
+  } else if (match.mode === 'online') {
+    first = 'O'; // online, 〇 always moves first (who plays 〇 is drawn when the match is made)
   } else {
     first = settings.firstPlayer === 'random' ? (Math.random() < 0.5 ? 'O' : 'X') : settings.firstPlayer;
   }
-  gs = { ...initialGameState(), current: first, settings: { turnLimit: settings.turnLimit } };
+  // online games share one rule set, so this device's move limit does not apply
+  gs = { ...initialGameState(), current: first, settings: { turnLimit: match.mode === 'online' ? null : settings.turnLimit } };
   phase = 'step1';
   selectedFrom = null;
   lastMoved = null;
@@ -696,7 +1346,10 @@ function startGame(m: MatchInfo = match): void {
   recorded = null;
   justUnlocked = false;
   reviewing = false;
-  clearSave();
+  reviewUntil = 0;
+  oppDropUntil = 0;
+  selfDropUntil = 0;
+  if (match.mode !== 'online') clearSave();
   if (!renderGame()) return;
   clockOn();
   tcStart();
@@ -735,13 +1388,15 @@ function renderGame(): boolean {
   peekLast = false;
   cpuActing = false;
   cpuToken++;
-  cpu = match.mode === 'cpu' ? new CpuClient() : null;
+  // online, the stand-in opponent plays with the CPU's engine until the server exists
+  cpu = match.mode === 'local' ? null : new CpuClient();
   tcRunning = false;
   tcHold = false;
   tcAnnounced = -1;
   tcByoShown = false;
 
   const G = t().game;
+  const net = match.mode === 'online';
   root.innerHTML = `
     <div class="game" data-turn="${gs.current}">
       <header class="topbar">
@@ -756,11 +1411,14 @@ function renderGame(): boolean {
           <button type="button" class="icon-btn" data-act="sound" title="${G.soundTip}"></button>
           <button type="button" class="icon-btn" data-act="settings" title="${G.settingsTip}">${icon('sliders')}</button>
           <button type="button" class="icon-btn" data-act="help" title="${G.rulesTip}">${icon('help')}</button>
-          <button type="button" class="icon-btn" data-act="pause" title="${G.pauseTip}">${icon('pause')}</button>
+          ${net
+            ? `<button type="button" class="icon-btn resign" data-act="pause" title="${t().online.resign}" aria-label="${t().online.resign}">${icon('flag')}</button>`
+            : `<button type="button" class="icon-btn" data-act="pause" title="${G.pauseTip}">${icon('pause')}</button>`}
         </div>
       </header>
       <aside class="side schematic-panel" id="schematic" aria-label="${G.mapAria}"></aside>
       <main class="stage" id="stage">
+        ${net ? '<div class="net-banner" id="net-banner" role="status" hidden></div>' : ''}
         <div class="toast-host" id="toasts" aria-live="polite"></div>
         <div class="turn-banner" id="banner" aria-hidden="true"></div>
         <div class="stage-tools" role="toolbar" aria-label="${G.viewAria}">
@@ -779,6 +1437,7 @@ function renderGame(): boolean {
         <div class="stage-help">${G.stageHelp}</div>
       </main>
       <aside class="side controls-panel" id="controls" aria-label="${G.controlsAria}"></aside>
+      ${net ? '<div class="net-cover" id="net-cover" hidden></div>' : ''}
       <div class="sr-only" id="live" aria-live="polite"></div>
     </div>`;
 
@@ -852,6 +1511,8 @@ function teardownGame(): void {
   cpu = null;
   window.clearInterval(tcTicker);
   tcTicker = 0;
+  waitModal?.close();
+  waitModal = null;
   if (!ui) return;
   clockOff();
   tcPause();
@@ -879,12 +1540,19 @@ function syncTopButtons(): void {
 // ── Derived state ──────────────────────────────────────────────────────────
 function canPlaceNow(): boolean { return legalPlacements(gs).length > 0; }
 
-function isCpuTurn(): boolean {
-  return match.mode === 'cpu' && gs.status === 'playing' && gs.current !== match.human;
+/** Your side in CPU and online games; null when two people share this device. */
+function mySide(): Player | null {
+  return match.mode === 'cpu' ? match.human : match.mode === 'online' ? match.found.me : null;
 }
-/** "PLAYER 1" (〇) / "PLAYER 2" (×) for two people; "あなた" / "CPU" against the CPU. */
+/** The CPU or the online opponent is to move. */
+function isOppTurn(): boolean {
+  const me = mySide();
+  return me !== null && gs.status === 'playing' && gs.current !== me;
+}
+/** "PLAYER 1" (〇) / "PLAYER 2" (×) for two people; "あなた" / "CPU" or the online opponent's name. */
 function nameOf(p: Player): string {
   if (match.mode === 'cpu') return p === match.human ? t().common.you : 'CPU';
+  if (match.mode === 'online') return p === match.found.me ? t().common.you : match.found.opponent;
   return p === 'O' ? 'PLAYER 1' : 'PLAYER 2';
 }
 /** Human input is blocked during animations and while the CPU plays its turn. */
@@ -940,8 +1608,11 @@ function checkEntries(): { line: Line; player: Player }[] {
  * (「誤審の訂正」): it ends like any other turn.
  */
 function canPlayOn(): boolean {
+  const me = mySide();
   return gs.status === `win:${other(gs.current)}` && gs.winReason === 'mate'
-    && (match.mode !== 'cpu' || gs.current === match.human);
+    && (me === null || gs.current === me)
+    // online, only within the 30 s to check the board
+    && (match.mode !== 'online' || performance.now() < reviewUntil);
 }
 /** Only that turn can face the player to move with a line no cube move breaks (in normal play it would be over). */
 function playingOn(): boolean {
@@ -958,17 +1629,20 @@ function nextLevelOf(): CpuLevel | null {
   const i = levels.indexOf(match.level);
   return i >= 0 && i < levels.length - 1 ? levels[i + 1] : null;
 }
-/** "YOUR TURN" / "CPU TURN" / "PLAYER 1 TURN". */
+/** "YOUR TURN" / "CPU TURN" / "OPPONENT TURN" / "PLAYER 1 TURN". */
 function turnName(p: Player): string {
   if (match.mode === 'cpu') return p === match.human ? 'YOUR TURN' : 'CPU TURN';
+  if (match.mode === 'online') return p === match.found.me ? 'YOUR TURN' : 'OPPONENT TURN';
   return `${nameOf(p)} TURN`;
 }
 
-/** "YOU WIN" / "CPU WIN" / "PLAYER 1 WIN" / "DRAW", with a short note only for the unusual endings. */
+/** "YOU WIN" / "CPU WIN" / "YOU LOSE" / "PLAYER 1 WIN" / "DRAW", with a short note only for the unusual endings. */
 function resultText(state: GameState): { title: string; reason: string; color: string } {
   if (state.status === 'win:O' || state.status === 'win:X') {
     const w: Player = state.status === 'win:O' ? 'O' : 'X';
-    const title = match.mode === 'cpu' ? (w === match.human ? 'YOU WIN' : 'CPU WIN') : `${nameOf(w)} WIN`;
+    const title = match.mode === 'cpu' ? (w === match.human ? 'YOU WIN' : 'CPU WIN')
+      : match.mode === 'online' ? (w === match.found.me ? 'YOU WIN' : 'YOU LOSE')
+      : `${nameOf(w)} WIN`;
     const reason = state.winReason === 'timeout' ? t().result.timeout : state.winReason === 'selfDestruct' ? t().result.selfDestruct : '';
     return { title, reason, color: PLAYER_COLORS[w].css };
   }
@@ -1004,7 +1678,10 @@ function refresh(): void {
     reviewing,
     nextLevel: nextLevelOf() !== null,
     names: { O: nameOf('O'), X: nameOf('X') },
-    cpu: match.mode === 'cpu' ? { side: other(match.human), label: levelLabel(match.level), acting: cpuActing } : null,
+    cpu: match.mode === 'cpu' ? { side: other(match.human), label: levelLabel(match.level), acting: cpuActing }
+      : match.mode === 'online' ? { side: other(match.found.me), label: match.found.opponent, acting: cpuActing, online: true }
+      : null,
+    reviewLeft: reviewing && match.mode === 'online' && reviewUntil ? reviewLeftText() : null,
     check: checked
       ? { by: other(gs.current), escapes: hintsOn() ? breakingMoves(gs.board, other(gs.current)).length : null }
       : null,
@@ -1114,10 +1791,14 @@ function hudStatus(): { main: string; sub: string; cls: string } {
   const s1 = phase !== 'step2';
   const steps = `<span class="st ${s1 ? 'on' : 'done'}">①${step1Label()}</span><span class="st ${s1 ? '' : 'on'}">②${H.cube}</span>`;
   const checked = inCheck(gs);
-  if (isCpuTurn()) {
-    const dots = cpuActing && s1 ? '<span class="think-dots"><i></i><i></i><i></i></span>' : '';
-    // the CPU being in check is your 王手: a small mark, not the highlight
-    return { main: `CPU TURN${dots}${checked ? `<span class="hud-badge">${H.checkBadge}</span>` : ''}`, sub: steps + ply, cls: 'cpu' };
+  if (isOppTurn()) {
+    const thinking = cpuActing && s1 ? '<span class="think-dots"><i></i><i></i><i></i></span>' : '';
+    // the other side being in check is your 王手: a small mark, not the highlight
+    const badge = checked ? `<span class="hud-badge">${H.checkBadge}</span>` : '';
+    // the CPU is always × (red); an online opponent may be either colour
+    return match.mode === 'online'
+      ? { main: `OPPONENT TURN${thinking}${badge}`, sub: steps + ply, cls: 'turn' }
+      : { main: `CPU TURN${thinking}${badge}`, sub: steps + ply, cls: 'cpu' };
   }
   if (checked) {
     const who = match.mode === 'local' ? `<span class="hud-who">${nameOf(gs.current)}</span>` : '';
@@ -1176,7 +1857,7 @@ function onCellClick(i: number | null, raw: number | null): void {
   if (cpuActing) {
     if (raw !== null && performance.now() - lastBusyToast > 2500) {
       lastBusyToast = performance.now();
-      toast(t().toast.cpuTurn);
+      toast(match.mode === 'online' ? t().toast.oppTurn : t().toast.cpuTurn);
     }
     return;
   }
@@ -1350,12 +2031,15 @@ async function finishGame(): Promise<void> {
   cpuActing = false;
   clockOff();
   tcPause();
-  clearSave();
+  if (match.mode !== 'online') clearSave();
+  const me = mySide();
+  // online, the player who was mated has 30 s to check the board (and may challenge the call)
+  reviewUntil = match.mode === 'online' && gs.winReason === 'mate' && gs.current === me ? performance.now() + MATE_REVIEW_MS : 0;
   setBusy(true);
   refresh();
   u.scene.showWin(winEntries(gs));
-  // against the CPU the jingle is from your side: a CPU win sounds like a loss
-  const happy = match.mode !== 'cpu' || gs.status === `win:${match.human}`;
+  // against the CPU or online the jingle is from your side: the other side's win sounds like a loss
+  const happy = me === null || gs.status === `win:${me}`;
   if (match.mode === 'cpu') {
     const result: GameResult = gs.status === 'draw' ? 'd' : happy ? 'w' : 'l';
     justUnlocked = recordResult(match.level, result, { undos: match.undos });
@@ -1370,6 +2054,14 @@ async function finishGame(): Promise<void> {
   if (ui !== u) return;
   setBusy(false);
   refresh();
+  if (match.mode === 'online') {
+    // you mated your opponent: they may check the board before the result is final
+    if (gs.winReason === 'mate' && happy) {
+      await waitForOpponentReview(u);
+      if (ui !== u) return;
+    }
+    online.reportResult(match.found, happy);
+  }
   showResult();
 }
 
@@ -1396,6 +2088,7 @@ function playOn(): void {
   resultModal?.close();
   resultModal = null;
   reviewing = false;
+  reviewUntil = 0;
   if (recorded) { // the result is counted when that turn ends
     recordResult(recorded.level, recorded.result, { undos: 0, undo: true });
     recorded = null;
@@ -1466,7 +2159,7 @@ function cancelCpu(): void {
 }
 
 function maybeStartCpu(): void {
-  if (!ui || !cpu || cpuActing || busy || !isCpuTurn()) return;
+  if (!ui || !cpu || cpuActing || busy || !isOppTurn() || oppDropUntil || selfDropUntil) return;
   const token = cpuToken;
   setTimeout(() => { if (token === cpuToken) void runCpuTurn(); }, 30);
 }
@@ -1502,10 +2195,13 @@ async function untilNoModal(alive: () => boolean): Promise<void> {
  */
 async function runCpuTurn(): Promise<void> {
   const u = ui, client = cpu;
-  if (!u || !client || cpuActing || busy || !isCpuTurn() || match.mode !== 'cpu') return;
-  const level = match.level;
+  if (!u || !client || cpuActing || busy || !isOppTurn() || match.mode === 'local') return;
+  const net = match.mode === 'online';
+  const level = match.mode === 'cpu' ? match.level : STAND_IN_LEVEL;
   const token = ++cpuToken;
   const alive = (): boolean => token === cpuToken && ui === u;
+  /** The CPU waits for your dialogs; an online opponent does not, but stops while a connection is down. */
+  const hold = (): Promise<void> => (net ? untilConnected(alive) : untilNoModal(alive));
   cpuActing = true;
   selectedMove = null;
   hoverMove = null;
@@ -1514,12 +2210,14 @@ async function runCpuTurn(): Promise<void> {
   const step1Done = phase === 'step2';
   const [decision] = await Promise.all([
     client.think(gs, level, step1Done, cpuThinkBudget(level)),
-    wait((step1Done ? 450 : 800) + Math.random() * 400),
+    // the stand-in takes a person's time to think
+    wait((step1Done ? 450 : 800) + Math.random() * 400 + (net ? 900 + Math.random() * 2200 : 0)),
   ]);
   if (!alive()) return;
   if (!decision) { cpuActing = false; refresh(); return; }
-  await untilNoModal(alive);
+  await hold();
   if (!alive()) return;
+  const say = (desc: string): string => (net ? t().hud.liveOpp(desc) : t().hud.liveCpu(desc));
 
   const me = gs.current;
   if (!step1Done && decision.step1) {
@@ -1531,14 +2229,14 @@ async function runCpuTurn(): Promise<void> {
       if (!alive()) return;
       u.scene.setHover(null, null);
       u.schematic.setHover(null);
-      u.live.textContent = t().hud.liveCpu(describeStep1(a, getLang()));
+      u.live.textContent = say(describeStep1(a, getLang()));
       await doPlace(a.index);
     } else {
       u.scene.setSelected(a.from);
       sound.select();
       await wait(520);
       if (!alive()) return;
-      u.live.textContent = t().hud.liveCpu(describeStep1(a, getLang()));
+      u.live.textContent = say(describeStep1(a, getLang()));
       await doMove(a.from, a.to);
     }
     if (!alive() || gs.status !== 'playing') return; // e.g. the clock ran out meanwhile
@@ -1548,10 +2246,10 @@ async function runCpuTurn(): Promise<void> {
   selectedMove = cube;
   sound.preview();
   updatePreview();
-  u.live.textContent = t().hud.liveCpu(describeMove(cube, getLang()));
+  u.live.textContent = say(describeMove(cube, getLang()));
   await wait(1050);
   if (!alive()) return;
-  await untilNoModal(alive);
+  await hold();
   if (!alive()) return;
   cpuActing = false;
   await doCubeMove(cube);
@@ -1604,7 +2302,8 @@ function onControlEvent(e: ControlEvent): void {
       break;
     case 'replay':
       sound.click();
-      startGame();
+      if (match.mode === 'online') onlineAgain();
+      else startGame();
       break;
     case 'title':
       sound.click();
@@ -1714,6 +2413,12 @@ function showResult(): void {
   const placed = log.filter(e => e.step1.kind === 'place').length;
   const moved = log.length - placed;
   const vsCpu = match.mode === 'cpu' ? match : null;
+  const me = mySide();
+  const clocked = match.mode === 'local' ? null : match.clock;
+  // a game that ended during your turn (降参, a lost connection) also spent that turn's time
+  const myLeft = clocked && me
+    ? Math.max(0, clocked.left[me] - (gs.current === me ? clocked.used : 0))
+    : 0;
   const unlock = vsCpu && justUnlocked
     ? `<div class="unlock" role="status">${icon('zap')}<div><b>${TR.unlockTitle}</b>
         <span>${TR.unlockBody(levelLabel(HIDDEN_LEVEL))}</span></div></div>`
@@ -1725,9 +2430,9 @@ function showResult(): void {
       ${r.reason ? `<div class="result-reason">${r.reason}</div>` : ''}
       <dl class="stats">
         <div><dt>${TR.moves}</dt><dd>${gs.ply}</dd></div>
-        ${vsCpu?.clock
-          ? `<div><dt>${TR.timeLeft}</dt><dd>${vsCpu.clock.left[vsCpu.human] > 0 || gs.winReason === 'timeout'
-            ? fmtClock(vsCpu.clock.left[vsCpu.human]) : TR.byoyomi}</dd></div>`
+        ${clocked && me
+          ? `<div><dt>${TR.timeLeft}</dt><dd>${myLeft > 0 || gs.winReason === 'timeout'
+            ? fmtClock(myLeft) : TR.byoyomi}</dd></div>`
           : `<div><dt>${TR.placedMoved}</dt><dd>${placed}${getLang() === 'ja' ? '／' : ' / '}${moved}</dd></div>`}
         <div><dt>${TR.elapsed}</dt><dd>${fmtTime(currentElapsed())}</dd></div>
       </dl>
@@ -1735,11 +2440,16 @@ function showResult(): void {
     </div>`;
   const actions: ModalAction[] = [
     { label: TC.toTitle, kind: 'ghost', onClick: () => { renderTitle(); } },
-    { label: TC.replay, kind: 'primary', autofocus: true, onClick: () => { startGame(); } },
+    {
+      label: TC.replay, kind: 'primary', autofocus: true,
+      // online: a new random opponent, or a rematch with the same one (合言葉)
+      onClick: () => { if (match.mode === 'online') setTimeout(onlineAgain, 0); else startGame(); },
+    },
   ];
   if (nextLevelOf()) actions.push({ label: TC.nextLevel, kind: 'ghost', onClick: () => { startNextLevel(); } });
   const aside = canPlayOn()
-    ? `<div class="aside-head">${icon('eye')}<b>${TR.reviewHead}</b></div>
+    ? `<div class="aside-head">${icon('eye')}<b>${TR.reviewHead}</b>${match.mode === 'online'
+        ? `<span class="review-timer" data-review-left>${reviewLeftText()}</span>` : ''}</div>
       <p>${TR.reviewBody(nameOf(other(gs.current)))}</p>
       <button type="button" class="btn ok" data-act="review">${icon('eye')}${TR.review}</button>`
     : undefined;
@@ -1759,6 +2469,8 @@ function showResult(): void {
 
 function confirmQuit(): void {
   if (gs.status !== 'playing') { renderTitle(); return; }
+  // an online game cannot be paused: leaving it means resigning
+  if (match.mode === 'online') { confirmResign(); return; }
   const P = t().pause;
   const vs = match.mode === 'cpu' ? P.vsCpu(levelLabel(match.level)) : P.two;
   const clock = clockFaces();
@@ -1775,10 +2487,12 @@ function confirmQuit(): void {
   });
 }
 
-function showSettings(): void {
+/** 設定. `note` is a short message shown in the online card (after deleting the online data). */
+function showSettings(note?: string): void {
   const S = t().settings;
+  const net = online.available();
   const body = document.createElement('div');
-  body.className = 'settings';
+  body.className = `settings${net ? ' has-online' : ''}`;
   const seg = <T extends string>(name: string, opts: [T, string][], cur: T): string =>
     `<div class="seg" role="radiogroup" data-seg="${name}">${opts.map(([v, l]) =>
       `<button type="button" role="radio" data-v="${v}" aria-checked="${v === cur}">${l}</button>`).join('')}</div>`;
@@ -1801,7 +2515,8 @@ function showSettings(): void {
       <label class="row"><span>${S.limit}<small>${S.limitSub}</small></span>
         <select data-k="turnLimit">${TURN_LIMITS.map(v => `<option value="${v ?? ''}" ${v === settings.turnLimit ? 'selected' : ''}>${v ? S.limitN(v) : t().common.none}</option>`).join('')}</select>
       </label>
-    </section>`;
+    </section>
+    ${net ? onlineSettingsHTML() : ''}`;
 
   body.querySelectorAll<HTMLInputElement>('input.switch').forEach(inp => {
     inp.addEventListener('change', () => {
@@ -1828,7 +2543,17 @@ function showSettings(): void {
   const sel = body.querySelector<HTMLSelectElement>('select[data-k="turnLimit"]');
   sel?.addEventListener('change', () => { setSetting('turnLimit', sel.value ? Number(sel.value) : null); sound.click(); });
 
-  openModal({ title: S.title, subtitle: S.tag, content: body, className: 'settings-modal', actions: [{ label: t().common.close, kind: 'primary' }] });
+  const m = openModal({ title: S.title, subtitle: S.tag, content: body, className: 'settings-modal', actions: [{ label: t().common.close, kind: 'primary' }] });
+  const card = body.querySelector<HTMLElement>('.set-card.online');
+  if (card) {
+    wireDocLinks(card);
+    card.querySelector('[data-act="delete-online"]')?.addEventListener('click', () => {
+      sound.click();
+      m.close();
+      setTimeout(confirmDeleteOnline, 0);
+    });
+    if (note) card.insertAdjacentHTML('beforeend', `<p class="set-note" role="status">${icon('check')}${note}</p>`);
+  }
 }
 
 // ═══════════════════════════════ Entry ═════════════════════════════════════
@@ -1841,13 +2566,15 @@ export function initApp(el: HTMLElement): void {
   window.addEventListener('pointerdown', unlock, { capture: true });
   window.addEventListener('keydown', unlock, { capture: true });
   document.addEventListener('keydown', onKey);
-  // leaving the page suspends the game: the play time and 持ち時間 stop until you come back
+  // leaving the page suspends a local game: the play time and 持ち時間 stop until you come back
+  // (online the clocks keep running, as they do for your opponent)
   document.addEventListener('visibilitychange', () => {
     if (!ui) return;
-    if (document.hidden) { clockOff(); tcPause(); persist(); }
+    if (document.hidden) { clockOff(); if (match.mode !== 'online') tcPause(); persist(); }
     else { clockOn(); tcStart(); }
   });
   window.addEventListener('pagehide', () => { if (ui) { clockOff(); tcPause(); persist(); } });
+  devHooks();
   renderTitle();
 }
 

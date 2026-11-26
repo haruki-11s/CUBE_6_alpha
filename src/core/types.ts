@@ -15,8 +15,10 @@ export type GameStatus = 'playing' | 'win:O' | 'win:X' | 'draw';
  * mate         詰み: the winner's line could not be broken by any cube move
  * notBroken    the loser ended their turn without breaking the winner's check
  * selfDestruct the loser's own cube move completed the winner's line
+ * resign       (online) the loser pressed 降参
+ * disconnect   (online) the loser's connection did not come back in time
  */
-export type WinReason = 'mate' | 'notBroken' | 'selfDestruct' | 'turnLimit' | 'timeout';
+export type WinReason = 'mate' | 'notBroken' | 'selfDestruct' | 'turnLimit' | 'timeout' | 'resign' | 'disconnect';
 
 export interface GameState {
   board: Mark[];

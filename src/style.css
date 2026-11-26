@@ -689,6 +689,140 @@ select { background: #161b38; border: 1px solid var(--line-2); border-radius: 8p
 .setup-note { margin-top: 8px; font-size: .76rem; color: var(--text-3); }
 .o-txt { color: var(--o-l); } .x-txt { color: var(--x-l); }
 
+/* ═══════════════════════════════ Online ══════════════════════════════ */
+.net-modal { width: min(440px, 100%); }
+.net-lead { color: var(--text-2); margin-bottom: 12px; }
+.net-points { list-style: none; display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.net-points li { display: flex; align-items: flex-start; gap: .6rem; padding: .55rem .7rem; border-radius: 10px; border: 1px solid var(--line); background: rgba(255, 255, 255, .025); font-size: .84rem; line-height: 1.6; color: var(--text); }
+.net-points .ico { width: 18px; height: 18px; margin-top: .2em; color: var(--accent); }
+.net-docs { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; }
+.link-btn { border: 0; background: none; padding: 0; color: var(--accent); font-size: .8rem; text-decoration: underline; text-underline-offset: 3px; }
+.link-btn:hover { color: #cfe0ff; }
+.net-doc-note { margin-top: 6px; font-size: .76rem; color: var(--warn); }
+/* ランダム対戦: looking for an opponent */
+.net-search { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; padding-top: 4px; }
+.net-radar { position: relative; width: 112px; height: 112px; display: grid; place-items: center; margin-bottom: 6px; }
+.net-radar i { position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid rgba(122, 168, 255, .6); opacity: 0; animation: radarPulse 2.4s var(--ease-out) infinite; }
+.net-radar i:nth-child(2) { animation-delay: .8s; }
+.net-radar i:nth-child(3) { animation-delay: 1.6s; }
+.net-radar span { width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center; color: #fff; background: radial-gradient(circle at 35% 30%, #a8c6ff, var(--accent) 60%, #2b4fa8); box-shadow: 0 0 28px rgba(122, 168, 255, .55); animation: orbPulse 1.6s ease-in-out infinite; }
+.net-radar span .ico { width: 24px; height: 24px; }
+.net-status { font-size: .95rem; color: var(--text); font-weight: 700; letter-spacing: .04em; }
+.net-time { font-family: var(--font-display); font-size: 1.5rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: .08em; }
+.net-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 4px; }
+.net-chips span { display: inline-flex; align-items: center; gap: .35rem; padding: .15rem .7rem; border-radius: 999px; font-size: .74rem; color: var(--text-2); border: 1px solid var(--line-2); background: rgba(255, 255, 255, .03); }
+.net-chips .ico { width: 13px; height: 13px; }
+.net-chips .ranked { color: #ffe08a; border-color: rgba(255, 204, 77, .45); background: rgba(255, 204, 77, .08); }
+.net-me { margin-top: 6px; font-size: .78rem; color: var(--text-3); }
+.net-note { display: flex; align-items: center; gap: .4rem; margin-top: 12px; font-size: .76rem; color: var(--text-3); }
+.net-note .ico { width: 14px; height: 14px; flex: none; }
+/* 合言葉 */
+.net-code-menu { display: flex; flex-direction: column; gap: 8px; }
+.code-choice {
+  display: flex; align-items: center; gap: .9rem; width: 100%; padding: .9rem 1rem; border-radius: 13px;
+  border: 1px solid var(--line-2); background: rgba(255, 255, 255, .03); text-align: left;
+  transition: border-color .2s, background .2s, transform .2s var(--ease-out), box-shadow .2s;
+}
+.code-choice:hover { border-color: var(--accent); background: rgba(122, 168, 255, .12); transform: translateX(3px); box-shadow: 0 0 24px rgba(122, 168, 255, .14); }
+.code-choice.primary { border-color: rgba(122, 168, 255, .7); background: linear-gradient(90deg, rgba(122, 168, 255, .2), rgba(255, 255, 255, .02)); }
+.code-choice > .ico { width: 26px; height: 26px; color: var(--accent); }
+.code-choice span { display: flex; flex-direction: column; gap: 2px; }
+.code-choice b { font-size: 1rem; letter-spacing: .04em; color: var(--text); }
+.code-choice small { font-size: .74rem; }
+.net-code { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+.net-code .net-lead { margin-bottom: 4px; }
+.code-show {
+  display: flex; align-items: center; justify-content: center; gap: 14px; padding: 14px; border-radius: 14px;
+  border: 1px solid rgba(122, 168, 255, .45); background: linear-gradient(180deg, rgba(122, 168, 255, .14), rgba(122, 168, 255, .04));
+}
+.code-big { font-family: var(--font-display); font-size: 2.2rem; font-weight: 900; letter-spacing: .14em; color: #e4edff; text-shadow: 0 0 18px rgba(122, 168, 255, .6); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.net-code .net-status { text-align: center; margin-top: 4px; }
+.net-expire { text-align: center; font-size: .76rem; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.code-label { font-size: .8rem; color: var(--text-2); }
+.code-input {
+  width: 100%; padding: .5rem .8rem; border-radius: 12px; border: 1px solid var(--line-2); background: #0e1230;
+  text-align: center; font-family: var(--font-display); font-size: 1.9rem; font-weight: 700; letter-spacing: .3em; text-indent: .3em;
+  color: var(--text); outline: none; transition: border-color .2s, box-shadow .2s;
+}
+.code-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-a); }
+.code-input::placeholder { color: #343b66; }
+.code-input:disabled { opacity: .6; }
+.code-err { min-height: 1.3em; font-size: .78rem; color: var(--danger); }
+/* the opponent is found: 〇 (先手) and × (後手) */
+.net-found { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.vs { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; }
+.vs-card { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; padding: 14px 8px 12px; border-radius: 14px; border: 1px solid var(--line-2); animation: popIn .5s var(--ease-back) both; }
+.vs-card.o { border-color: var(--o-g); background: linear-gradient(180deg, var(--o-a), rgba(255, 255, 255, .02)); }
+.vs-card.x { border-color: var(--x-g); background: linear-gradient(180deg, var(--x-a), rgba(255, 255, 255, .02)); animation-delay: .12s; }
+.vs-card.me { box-shadow: 0 0 0 1px rgba(255, 255, 255, .25), 0 0 26px rgba(255, 255, 255, .08); }
+.vs-chip { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 50%; color: #fff; font-weight: 800; font-size: 1.5rem; }
+.vs-card.o .vs-chip { background: radial-gradient(circle at 35% 30%, var(--o-l), var(--o) 62%); box-shadow: 0 0 20px var(--o-g); }
+.vs-card.x .vs-chip { background: radial-gradient(circle at 35% 30%, var(--x-l), var(--x) 62%); box-shadow: 0 0 20px var(--x-g); }
+.vs-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .95rem; color: var(--text); }
+.vs-card small { font-family: var(--font-display); font-size: .66rem; letter-spacing: .04em; }
+.vs-order { margin-top: 2px; padding: 0 .6rem; border-radius: 999px; font-size: .7rem; font-weight: 700; border: 1px solid currentColor; }
+.vs-card.o .vs-order { color: var(--o-l); }
+.vs-card.x .vs-order { color: var(--x-l); }
+.vs-mid { font-family: var(--font-display); font-weight: 900; font-size: 1.2rem; letter-spacing: .1em; color: var(--text-3); }
+.net-countdown { font-size: .84rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+/* waiting for the other player (their check of the board, a rematch) */
+.net-wait { display: flex; align-items: center; gap: .9rem; padding: .3rem 0; }
+.net-wait b { font-size: .92rem; color: var(--text); }
+.net-wait small { display: block; margin-top: 2px; font-size: .76rem; font-variant-numeric: tabular-nums; }
+.net-wait .cpu-orb { --turn-l: #a8c6ff; --turn: var(--accent); --turn-g: rgba(122, 168, 255, .55); }
+.wait-modal { width: min(400px, 100%); }
+/* in the game: your opponent's connection dropped (banner) / yours did (cover) */
+.net-banner {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 5;
+  display: flex; align-items: center; gap: .5rem; padding: .45rem 1rem; border-radius: 999px; white-space: nowrap;
+  font-size: .84rem; font-weight: 700; color: #ffe08a; background: rgba(40, 30, 6, .9); border: 1px solid rgba(255, 204, 77, .55);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45), 0 0 24px rgba(255, 204, 77, .15); font-variant-numeric: tabular-nums; animation: toastIn .3s var(--ease-out);
+}
+.net-banner[hidden] { display: none; }
+.net-banner .ico { width: 16px; height: 16px; flex: none; }
+.game.net-alert .toast-host { top: 58px; }
+.net-cover { position: fixed; inset: 0; z-index: 90; display: grid; place-items: center; padding: 16px; background: rgba(3, 4, 10, .62); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); animation: fadeIn .25s ease; }
+.net-cover[hidden] { display: none; }
+.net-cover-card { display: flex; flex-direction: column; align-items: center; gap: .55rem; padding: 22px 30px; border-radius: var(--r-lg); border: 1px solid rgba(255, 90, 110, .5); background: linear-gradient(180deg, #1a1430, #0f0d22); box-shadow: var(--shadow); text-align: center; }
+.net-cover-card b { display: inline-flex; align-items: center; gap: .45rem; font-size: 1.05rem; color: #ffd2d8; }
+.net-cover-card b .ico { width: 18px; height: 18px; }
+.net-cover-card [data-left] { font-size: .86rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.net-spin { width: 34px; height: 34px; border-radius: 50%; border: 3px solid rgba(255, 255, 255, .12); border-top-color: var(--accent); animation: spin .9s linear infinite; }
+/* 降参 in the top bar */
+.icon-btn.resign:hover { color: #ffb8c3; border-color: rgba(255, 90, 110, .55); background: rgba(255, 90, 110, .12); }
+/* the 30 s to check the board after 詰み */
+.review-timer { margin-left: auto; padding: 0 .55rem; border-radius: 999px; font-size: .7rem; font-weight: 700; letter-spacing: .02em; color: var(--warn); border: 1px solid rgba(255, 204, 77, .45); background: rgba(255, 204, 77, .08); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* ランキング */
+.ranking-modal { width: min(500px, 100%); }
+.ranking { display: flex; flex-direction: column; gap: 10px; }
+.rank-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .2rem .8rem; font-size: .74rem; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.rank-reset { color: var(--accent); }
+.rank-body { min-height: 120px; }
+.rank-list { list-style: none; max-height: min(44vh, 380px); overflow-y: auto; display: flex; flex-direction: column; gap: 3px; padding-right: 4px; scrollbar-width: thin; scrollbar-color: #2a3156 transparent; }
+.rank-row { display: grid; grid-template-columns: 4.2em minmax(0, 1fr) auto; align-items: center; gap: .6rem; padding: .38rem .7rem; border-radius: 9px; font-size: .86rem; background: rgba(255, 255, 255, .025); border: 1px solid transparent; }
+.rank-row .rank-no { font-family: var(--font-display); font-weight: 700; font-size: .8rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.rank-row .rank-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-display); font-size: .78rem; letter-spacing: .04em; color: var(--text); }
+.rank-row .rank-name small { margin-left: .5em; font-family: var(--font); font-size: .66rem; font-weight: 700; letter-spacing: .06em; color: var(--accent); }
+.rank-row .rank-wins { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.rank-row.top { background: rgba(255, 255, 255, .045); }
+.rank-row.top1 .rank-no { color: #ffd76a; text-shadow: 0 0 10px rgba(255, 215, 106, .55); }
+.rank-row.top2 .rank-no { color: #e3e9f7; }
+.rank-row.top3 .rank-no { color: #f0a86e; }
+.rank-row.me { border-color: rgba(122, 168, 255, .6); background: linear-gradient(90deg, rgba(122, 168, 255, .2), rgba(122, 168, 255, .05)); }
+.rank-mine { padding-top: 10px; border-top: 1px solid var(--line-2); }
+.rank-none, .rank-empty { padding: .4rem 0; text-align: center; font-size: .8rem; color: var(--text-3); }
+.rank-loading { display: flex; align-items: center; justify-content: center; min-height: 120px; font-size: .84rem; color: var(--text-3); }
+.rank-fail { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 120px; font-size: .84rem; color: var(--text-2); }
+.rank-note { font-size: .72rem; color: var(--text-3); }
+/* 設定 → ネット対戦 */
+.settings.has-online { grid-template-areas: "sound disp" "rules disp" "online online"; }
+.set-card.online { grid-area: online; }
+.net-name { font-family: var(--font-display); font-size: .86rem; letter-spacing: .06em; color: var(--accent); }
+.settings .docs-row { flex-wrap: wrap; }
+.docs-row .net-doc-note { flex-basis: 100%; margin-top: 0; text-align: right; }
+.set-note { display: flex; align-items: center; gap: .4rem; padding: .2rem 0 .7rem; font-size: .78rem; color: var(--ok); }
+.set-note .ico { width: 14px; height: 14px; }
+
 /* ═══════════════════════════════ Responsive ═══════════════════════════ */
 @media (max-width: 1100px) {
   .game {
@@ -731,14 +865,14 @@ select { background: #161b38; border: 1px solid var(--line-2); border-radius: 8p
   .hud-status { grid-area: st; min-width: 0; }
   .hud-side.o { grid-area: o; justify-self: stretch; max-width: none; }
   .hud-side.x { grid-area: x; justify-self: stretch; max-width: none; }
-  .hud-side { padding: .2rem .55rem .2rem .2rem; gap: .45rem; border-radius: 11px; }
-  .hud-side.x { padding: .2rem .2rem .2rem .55rem; }
+  .hud-side { padding: .2rem .42rem .2rem .2rem; gap: .35rem; border-radius: 11px; }
+  .hud-side.x { padding: .2rem .2rem .2rem .42rem; }
   .hud-chip { width: 26px; height: 26px; font-size: .9rem; }
-  .hud-name { font-size: .7rem; }
+  .hud-name { font-size: .64rem; letter-spacing: 0; }
   .hud-hand-n { display: none; }
   .dots { gap: 2px; } .dots i { width: 6px; height: 6px; }
-  .hud-clock { padding-left: .5rem; font-size: .88rem; }
-  .hud-side.x .hud-clock { padding-right: .5rem; }
+  .hud-clock { padding-left: .4rem; font-size: .82rem; }
+  .hud-side.x .hud-clock { padding-right: .4rem; }
   .hud-clock .ico { display: none; }
   .hud-main { font-size: .86rem; letter-spacing: .1em; padding: 0 .55rem; }
   .hud-status.check .hud-main { letter-spacing: .2em; }
@@ -749,6 +883,12 @@ select { background: #161b38; border: 1px solid var(--line-2); border-radius: 8p
   /* the page scrolls here, so 100% has no height to fill: centre within the screen, clear of the corner buttons */
   .title-ui { min-height: 100vh; min-height: 100dvh; padding: 72px 1.25rem 3.2rem; gap: 2rem; }
   .settings { grid-template-columns: 1fr; grid-template-areas: "sound" "disp" "rules"; }
+  .settings.has-online { grid-template-areas: "sound" "disp" "rules" "online"; }
+  .code-big { font-size: 1.8rem; }
+  .code-show { flex-direction: column; gap: 8px; }
+  .vs { gap: 6px; }
+  .vs-card { padding: 12px 6px 10px; }
+  .net-banner { top: 8px; font-size: .76rem; padding: .4rem .8rem; }
   .rules-nav { top: -18px; }
   .icon-btn { width: 34px; height: 34px; }
   .schematic-panel, .controls-panel { border-left: 0; overflow: visible; }
@@ -786,6 +926,7 @@ select { background: #161b38; border: 1px solid var(--line-2); border-radius: 8p
 @keyframes clockPulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
 @keyframes checkPulse { 0%, 100% { box-shadow: 0 0 0 2px var(--check), 0 0 6px var(--check); } 50% { box-shadow: 0 0 0 3px var(--check), 0 0 18px var(--check); } }
 @keyframes unlockIn { from { opacity: 0; transform: scale(.88); } to { opacity: 1; transform: none; } }
+@keyframes radarPulse { 0% { opacity: .9; transform: scale(.45); } 100% { opacity: 0; transform: scale(1.15); } }
 @keyframes toastIn { from { opacity: 0; transform: translateY(-8px) scale(.96); } to { opacity: 1; transform: none; } }
 @keyframes bannerIn {
   0% { opacity: 0; transform: translateX(-60px) scale(.96); }
