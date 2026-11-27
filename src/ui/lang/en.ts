@@ -79,6 +79,7 @@ const en: Messages = {
     codeStart: 'Start',
     codeInvalid: 'Please enter 6 digits.',
     codeNotFound: 'No game is waiting under this code. Please check the number.',
+    codeTooMany: 'Too many tries in a row. Please wait a moment and enter it again.',
     joining: 'Looking for the game',
     foundTitle: 'Opponent found', foundTag: '',
     first: 'First',
@@ -97,8 +98,10 @@ const en: Messages = {
     reviewLeft: sec => `${sec} s left`,
     oppReviewing: 'Your opponent is checking the board',
     oppReviewLeft: left => `${left} left`,
+    oppChallenged: 'Your opponent challenged the call. Play goes on',
     rematchTitle: 'Rematch', rematchTag: '',
     rematchWaiting: 'You asked for a rematch. Waiting for your opponent’s answer',
+    rematchAsked: 'Your opponent asks for a rematch',
     rematchLeft: 'Your opponent has left.',
     offlineTitle: 'Cannot connect',
     offline: 'Could not reach the server. Please check your connection and try again.',
@@ -398,6 +401,12 @@ const en: Messages = {
 
   modal: {
     close: 'Close',
+  },
+
+  // AdSense allows only "Advertisements" or "Sponsored Links" as an ad unit's label
+  ads: {
+    label: 'Advertisements',
+    sample: 'Sample ad',
   },
 };
 

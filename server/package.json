@@ -1,0 +1,19 @@
+{
+  "name": "cube6-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "login": "wrangler login",
+    "logout": "wrangler logout",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 migrations apply cube6 --local",
+    "db:remote": "wrangler d1 migrations apply cube6 --remote",
+    "types": "wrangler types",
+    "check": "node ../node_modules/typescript/bin/tsc -p ."
+  },
+  "devDependencies": {
+    "wrangler": "4.168.0"
+  }
+}

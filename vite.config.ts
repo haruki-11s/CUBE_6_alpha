@@ -16,5 +16,7 @@ export default defineConfig({
     passWithNoTests: true,
     // the CPU tests search for real (up to ~4 s locally); CI machines can be slower than the 5 s default
     testTimeout: 30_000,
+    // tests/ads.test.ts reads the stylesheet's ad rules (?raw); other CSS stays empty in tests
+    css: { include: [/src\/style\.css/] },
   },
 });

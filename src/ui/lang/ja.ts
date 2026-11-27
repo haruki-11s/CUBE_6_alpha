@@ -78,6 +78,7 @@ const ja = {
     codeStart: 'はじめる',
     codeInvalid: '6桁の数字を入れてください。',
     codeNotFound: 'この合言葉の対局は見つかりません。数字を確かめてください。',
+    codeTooMany: '入力が続いたため、少し時間をおいてからもう一度入れてください。',
     joining: '対局を探しています',
     // 対戦相手の発表
     foundTitle: '対戦相手が見つかりました', foundTag: 'MATCH',
@@ -98,9 +99,11 @@ const ja = {
     reviewLeft: (sec: number): string => `残り ${sec} 秒`,
     oppReviewing: '相手が盤面を確認しています',
     oppReviewLeft: (left: string): string => `あと ${left}`,
+    oppChallenged: '相手が「誤審の訂正」を選びました。対局を続けます',
     // 再戦（合言葉）
     rematchTitle: '再戦', rematchTag: 'REMATCH',
     rematchWaiting: '相手に再戦を申し込みました。返事を待っています',
+    rematchAsked: '相手が再戦を申し込んでいます',
     rematchLeft: '相手は退出しました。',
     // つながらないとき
     offlineTitle: '接続できません',
@@ -403,6 +406,12 @@ const ja = {
 
   modal: {
     close: '閉じる',
+  },
+
+  // 広告の枠（AdSense で使える表示は「広告」か「スポンサーリンク」だけ）
+  ads: {
+    label: '広告',
+    sample: '広告の見本',
   },
 };
 

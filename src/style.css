@@ -149,8 +149,9 @@ kbd {
 .menu-btn.primary { border-color: rgba(122, 168, 255, .7); background: linear-gradient(90deg, rgba(122, 168, 255, .22), rgba(12, 15, 32, .6)); box-shadow: 0 0 26px rgba(122, 168, 255, .14); }
 .menu-btn.soon > span { color: var(--text-2); }
 .menu-btn.soon small { color: var(--warn); opacity: .85; }
-/* ≡ menu in the top-right corner: 設定・戦績・EXIT */
-.title-corner { position: absolute; top: 16px; right: 16px; z-index: 3; }
+/* ≡ menu in the top-right corner: 設定・EXIT. It sits level with the language button, which is
+   15px lower than the corner inset because of the LANGUAGE caption above it. */
+.title-corner { position: absolute; top: 31px; right: 16px; z-index: 3; }
 .corner-toggle {
   width: 46px; height: 46px; display: grid; place-items: center; border-radius: 13px;
   border: 1px solid var(--line-2); background: rgba(12, 15, 32, .6); color: var(--text);
@@ -192,8 +193,14 @@ kbd {
   position: absolute; left: 0; right: 0; bottom: 14px; z-index: 1; text-align: center;
   font-size: .72rem; color: var(--text-3); letter-spacing: .12em; animation: fadeIn 1s .8s both;
 }
-/* language button in the top-left corner (the same look as ≡) */
+/* language button in the top-left corner (the same look as ≡), under a faint LANGUAGE caption for
+   players who do not recognise the globe. The caption takes 15px (10px + 5px gap). */
 .title-lang { position: absolute; top: 16px; left: 16px; z-index: 3; }
+.lang-cap {
+  display: block; height: 10px; margin: 0 0 5px 4px; line-height: 10px; white-space: nowrap;
+  font-family: var(--font-display); font-size: .56rem; letter-spacing: .24em; text-transform: uppercase;
+  color: var(--text-3); pointer-events: none; user-select: none; animation: fadeIn .8s .6s both;
+}
 .corner-toggle.lang-toggle { width: auto; padding: 0 15px 0 13px; gap: .5rem; display: inline-flex; align-items: center; font-size: .9rem; letter-spacing: .04em; }
 .corner-toggle.lang-toggle .ico { width: 20px; height: 20px; color: var(--accent); }
 .corner-menu.lang-menu { left: 0; right: auto; min-width: 180px; }
@@ -221,7 +228,7 @@ kbd {
 .menu.quick > :nth-child(3) { animation-delay: .08s; }
 .menu.quick > :nth-child(4) { animation-delay: .12s; }
 .menu.quick > :nth-child(5) { animation-delay: .16s; }
-.title.settled .logo, .title.settled .subtitle, .title.settled .corner-toggle, .title.settled .title-foot { animation: none; }
+.title.settled .logo, .title.settled .subtitle, .title.settled .corner-toggle, .title.settled .lang-cap, .title.settled .title-foot { animation: none; }
 /* English: the subtitle is longer, so it is set in capitals with less spacing */
 html[lang="en"] .subtitle { letter-spacing: .24em; text-indent: .24em; text-transform: uppercase; font-size: clamp(.74rem, 2.1vw, .95rem); }
 
@@ -387,6 +394,14 @@ html[lang="en"] .subtitle { letter-spacing: .24em; text-indent: .24em; text-tran
   background: rgba(255, 255, 255, .02); border: 1px solid var(--line); transition: box-shadow .2s, border-color .2s;
 }
 .sch-layer.affected .sch-grid { border-color: var(--hl); box-shadow: 0 0 0 1px var(--hl), 0 0 16px -4px var(--hl); }
+/* three columns: on a short screen (a laptop, or under the ad strip) the layers shrink to the
+   panel's height, so the panel needs no scrolling. Each grid is square, so three of them, two 10px
+   gaps and three ~17px labels fill the height. */
+@media (min-width: 1101px) {
+  .sch { height: 100%; }
+  .sch-layers { flex: 1 1 0; min-height: 0; container-type: size; }
+  .sch-layer { width: min(100%, max(96px, calc((100cqh - 71px) / 3))); align-self: center; }
+}
 .sch-cell {
   position: relative; aspect-ratio: 1; border-radius: 50%; padding: 0;
   border: 1px solid rgba(120, 140, 220, .22); background: radial-gradient(circle at 50% 40%, #151a33, #0b0e1d);
@@ -715,6 +730,10 @@ select { background: #161b38; border: 1px solid var(--line-2); border-radius: 8p
 .net-chips .ranked { color: #ffe08a; border-color: rgba(255, 204, 77, .45); background: rgba(255, 204, 77, .08); }
 .net-me { margin-top: 6px; font-size: .78rem; color: var(--text-3); }
 .net-note { display: flex; align-items: center; gap: .4rem; margin-top: 12px; font-size: .76rem; color: var(--text-3); }
+/* 合言葉, in the result window: the opponent asks for a rematch (or has left) */
+.result-note { display: flex; align-items: center; justify-content: center; gap: .4rem; margin: .9rem 0 0; font-size: .84rem; color: var(--text-2); animation: fadeUp .4s var(--ease-out) both; }
+.result-note.on { color: var(--accent); }
+.result-note .ico { width: 15px; height: 15px; flex: none; }
 .net-note .ico { width: 14px; height: 14px; flex: none; }
 /* 合言葉 */
 .net-code-menu { display: flex; flex-direction: column; gap: 8px; }
@@ -823,6 +842,81 @@ select { background: #161b38; border: 1px solid var(--line-2); border-radius: 8p
 .set-note { display: flex; align-items: center; gap: .4rem; padding: .2rem 0 .7rem; font-size: .78rem; color: var(--ok); }
 .set-note .ico { width: 14px; height: 14px; }
 
+/* ═══════════════════════════════ Ads ══════════════════════════════════ */
+/* Ad slots (src/ui/ads.ts). None exist until ads are switched on, so the layout above is unchanged.
+   An ad shows with its screen. Accidental clicks are kept out by placement alone, since nothing may
+   hide, cover or delay an ad: each slot has a fixed size (nothing moves when an ad arrives), and
+   none sits next to the board or the game's buttons. */
+.ad-slot { --ad-w: 320px; --ad-h: 100px; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.ad-label {
+  font-size: .58rem; line-height: 10px; letter-spacing: .2em; color: var(--text-3); white-space: nowrap;
+  user-select: none; pointer-events: none;
+}
+html[lang="en"] .ad-label { letter-spacing: .08em; }
+.ad-box { position: relative; flex: none; width: min(var(--ad-w), 100%); height: var(--ad-h); overflow: hidden; border-radius: 4px; }
+/* the sample frame (dev builds opened with ?ads=preview) */
+.ad-slot.preview .ad-box {
+  display: grid; place-items: center; border: 1px dashed rgba(170, 186, 255, .38);
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .045) 0 10px, rgba(255, 255, 255, .012) 10px 20px);
+}
+.ad-sample { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: .72rem; letter-spacing: .12em; color: var(--text-2); }
+.ad-sample small { font-family: var(--font-display); font-size: .6rem; letter-spacing: .1em; color: var(--text-3); }
+
+/* title: a banner at the bottom, under the version line. The menu keeps a clear zone above it. */
+.ad-title {
+  --ad-w: 728px; --ad-h: 90px;
+  position: absolute; left: 0; right: 0; bottom: max(10px, env(safe-area-inset-bottom)); z-index: 1; padding: 0 16px;
+}
+.title.has-ad .title-ui { padding-bottom: 150px; }
+.title.has-ad .title-foot { bottom: 122px; }
+/* a short screen (a laptop): the logo and the menu tighten, so the menu keeps 48px or more clear of
+   the banner's label */
+@media (min-width: 761px) and (max-height: 800px) {
+  .title.has-ad .title-ui { gap: 1.4rem; }
+  .title.has-ad .logo { font-size: clamp(3.2rem, 11vh, 7rem); }
+  .title.has-ad .subtitle { margin-top: .6rem; }
+  .title.has-ad .menu { gap: .5rem; }
+  .title.has-ad .menu-btn { padding-block: .7rem; }
+}
+
+/* game: PCs and laptops (a mouse or touchpad, the three-column layout, 650px of height or more), in
+   a strip above the top bar, centred over the HUD (which has no buttons), so it is far from the
+   board, the view tools and the panels. Phones and tablets get no banner in play. Under the strip
+   the 見取り図 shrinks to fit (see "Schematic"), and on a short laptop screen the controls tighten. */
+.ad-game { display: none; }
+@media (min-width: 1101px) and (min-height: 650px) and (hover: hover) and (pointer: fine) {
+  .game.has-ad {
+    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas: "ad ad ad" "top top top" "sch stage ctl";
+  }
+  .game.has-ad .ad-game {
+    --ad-w: 728px; --ad-h: 90px;
+    grid-area: ad; display: flex; flex-direction: row; justify-content: center; gap: 10px;
+    padding: 6px 16px; background: rgba(5, 6, 12, .9); border-bottom: 1px solid var(--line);
+  }
+}
+/* a laptop screen under the strip: the controls tighten, and 盤面の確認 drops its one-line how-to
+   (the window before it says the same), so play fits without scrolling */
+@media (min-width: 1101px) and (min-height: 650px) and (max-height: 800px) and (hover: hover) and (pointer: fine) {
+  .game.has-ad .controls-panel { gap: 6px; padding-block: 6px; }
+  .game.has-ad .controls-panel .card { padding: 9px 11px; }
+  .game.has-ad .controls-panel .card-title { margin-bottom: 6px; }
+  .game.has-ad .review-card .lead { display: none; }
+}
+
+/* result: between the figures and the buttons, 48px clear of the buttons (30px here + their 18px):
+   a fingertip's width, so a tap that misses a button still misses the ad */
+.ad-result { width: 100%; margin: 12px 0 30px; }
+@media (min-width: 761px) and (min-height: 860px) { .ad-result { --ad-w: 300px; --ad-h: 250px; } }
+@media (max-height: 699px) { .ad-result { --ad-h: 50px; } }
+/* a very short screen: the icon and the title tighten, so the result and 盤面の確認 still fit */
+@media (max-height: 640px) {
+  .result-modal:has(.ad-result) { padding-top: 16px; }
+  .result-modal:has(.ad-result) .rchip { width: 56px; height: 56px; font-size: 1.8rem; }
+  .result-modal:has(.ad-result) .result-title { margin-top: 4px; font-size: 2rem; }
+  .result-modal:has(.ad-result) .stats { margin-top: 8px; }
+}
+
 /* ═══════════════════════════════ Responsive ═══════════════════════════ */
 @media (max-width: 1100px) {
   .game {
@@ -878,10 +972,10 @@ select { background: #161b38; border: 1px solid var(--line-2); border-radius: 8p
   .hud-status.check .hud-main { letter-spacing: .2em; }
   .hud-sub { display: none; }
   .top-actions { margin-left: auto; }
-  .title-corner { top: 10px; right: 10px; }
+  .title-corner { top: 25px; right: 10px; }
   .title-lang { top: 10px; left: 10px; }
   /* the page scrolls here, so 100% has no height to fill: centre within the screen, clear of the corner buttons */
-  .title-ui { min-height: 100vh; min-height: 100dvh; padding: 72px 1.25rem 3.2rem; gap: 2rem; }
+  .title-ui { min-height: 100vh; min-height: 100dvh; padding: 87px 1.25rem 3.2rem; gap: 2rem; }
   .settings { grid-template-columns: 1fr; grid-template-areas: "sound" "disp" "rules"; }
   .settings.has-online { grid-template-areas: "sound" "disp" "rules" "online"; }
   .code-big { font-size: 1.8rem; }
@@ -904,6 +998,11 @@ select { background: #161b38; border: 1px solid var(--line-2); border-radius: 8p
   .lv-meter i { width: 5px; height: 12px; }
   .rule-split figure { order: -1; }
   .modal { padding: 18px 16px 14px; }
+  /* ads: a 320×50 banner under the title menu; the result box may use the window's side padding */
+  .ad-title { --ad-w: 320px; --ad-h: 50px; }
+  .title.has-ad .title-ui { padding-bottom: 132px; }
+  .title.has-ad .title-foot { bottom: 80px; }
+  .result-modal .ad-result { width: calc(100% + 24px); margin-inline: -12px; }
 }
 
 /* ═══════════════════════════════ Keyframes ════════════════════════════ */

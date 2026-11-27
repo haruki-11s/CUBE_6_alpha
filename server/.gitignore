@@ -1,0 +1,5 @@
+node_modules/
+.wrangler/
+# local secrets for `wrangler dev` (production secrets live in Cloudflare)
+.dev.vars
+worker-configuration.d.ts

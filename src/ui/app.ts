@@ -2,14 +2,14 @@ import { Scene3D, type ViewPreset } from './scene3d';
 import { Schematic, type SchematicState } from './schematic';
 import { Controls, type ClockFace, type ControlEvent, type Outcome } from './controls';
 import {
-  initialGameState, legalPlacements, legalCubeMoves, allCubeMoves,
-  applyStep1Place, applyStep1Move, resolveAfterCubeMove,
+  initialGameState, legalPlacements, legalMoves, legalCubeMoves, allCubeMoves,
+  applyStep1Place, applyStep1Move, resolveAfterCubeMove, applyFullTurn,
   applyCubeMove, movePermutation, movesEqual, completedLines,
   inCheck, checkLines, breakingMoves, isMate,
 } from '../core/game';
 import { parseSave, type LogEntry, type MatchInfo, type SaveData, type SavedPhase, type Snapshot } from '../core/save';
 import type { Line } from '../core/lines';
-import type { CubeMove, GameState, Mark, Player } from '../core/types';
+import type { CubeMove, GameState, Mark, Player, Step1Action } from '../core/types';
 import { LEVEL_PARAMS, type CpuLevel } from '../core/ai';
 import { describeMove, describeStep1 } from '../core/notation';
 import {
@@ -26,6 +26,7 @@ import { openModal, isModalOpen, type ModalAction, type ModalHandle } from './mo
 import { icon, type IconName } from './icons';
 import { rulesHTML } from './rules';
 import { getLang, isLang, LANGS, setLang, t, type Lang } from './i18n';
+import { adSlot, adsOn, fillAds } from './ads';
 import { APP_VERSION, PLAYER_COLORS, other } from './theme';
 import { CpuClient } from './cpu';
 import {
@@ -35,8 +36,10 @@ import {
   formatRoomCode, isRoomCode, MATE_REVIEW_MS, normalizeRoomCode, ONLINE_CLOCK, rankingPeriod, RECONNECT_MS, timeUntil,
   type RankingKind,
 } from '../core/online';
+import type { ClockSync, GameSnapshot, Turn } from '../core/protocol';
 import {
-  isAbort, NetError, online, previewConfig, type MatchFound, type NetErrorCode, type RankingData, type RankingRow,
+  breakServerLink, isAbort, NetError, online, previewConfig, previewRoom,
+  type EndMsg, type GameLink, type MatchFound, type NetErrorCode, type RankingData, type RankingRow, type TurnMsg,
 } from './online';
 
 type Phase = SavedPhase;
@@ -47,7 +50,16 @@ interface OnlineMatch {
   found: MatchFound;
   clock: ClockInfo;
   undos: number;
+  /** The connection to the game room. */
+  link: GameLink;
 }
+
+/** What the room said, played in order between animations (performance.now() when it arrived). */
+type NetEvent =
+  | { k: 'turn'; turn: TurnMsg; at: number }
+  | { k: 'playOn'; clock: ClockSync; at: number }
+  | { k: 'end'; end: EndMsg; at: number }
+  | { k: 'state'; state: GameSnapshot; at: number };
 type GameMatch = MatchInfo | OnlineMatch;
 
 interface GameUI {
@@ -97,9 +109,7 @@ let reviewing = false;
 /** Removes the title screen's document listeners (its two menus and Esc). */
 let titleUiCleanup: (() => void) | null = null;
 
-// ── Online (a stand-in plays the opponent until the server exists) ──
-/** The strength the stand-in opponent plays at. */
-const STAND_IN_LEVEL: CpuLevel = 3;
+// ── Online (the room decides; this screen shows what it says) ──
 /** Online, after you were mated: when your time to check the board ends (performance.now()); 0 = none. */
 let reviewUntil = 0;
 /** Your opponent's connection dropped: when they lose unless it comes back; 0 = connected. */
@@ -108,6 +118,23 @@ let oppDropUntil = 0;
 let selfDropUntil = 0;
 /** "Your opponent is checking the board", while it is shown. */
 let waitModal: ModalHandle | null = null;
+/** The room's messages, played one at a time between animations. */
+let netQueue: NetEvent[] = [];
+let netBusy = false;
+/** The room's game arrived while the match was being announced (before the game screen). */
+let earlyState: GameSnapshot | null = null;
+/** Your opponent's move is being shown: doCubeMove must not send it back to the room. */
+let applyingRemote = false;
+/** The room has said the result is final. */
+let netFinal = false;
+/** You mated your opponent and wait while they check the board: how that ended. */
+let reviewWait: ((how: 'final' | 'playOn' | 'gone') => void) | null = null;
+/** You asked for a rematch and wait for the answer. */
+let rematchWait: { found: (f: MatchFound) => void; left: () => void } | null = null;
+/** Your opponent has left the room (no rematch). */
+let oppLeft = false;
+/** Your opponent asks for a rematch (合言葉). */
+let oppWantsRematch = false;
 const pause = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
 
 let elapsed = 0;
@@ -206,7 +233,8 @@ function tcEndTurn(p: Player): void {
 function clockFaces(): Record<Player, ClockFace> | null {
   const c = gameClock();
   if (!c) return null;
-  const used = tcUsed(c);
+  // online, "used" is negative until the clock starts (the countdown, or the last move being shown)
+  const used = Math.max(0, tcUsed(c));
   const face = (p: Player): ClockFace => {
     const active = gs.status === 'playing' && gs.current === p;
     const tt = turnTime(c, c.left[p], active ? used : 0);
@@ -238,7 +266,8 @@ function tcTick(): void {
   const p = gs.current;
   const tt = turnTime(c, c.left[p], tcUsed(c));
   if (tt.phase === 'out') {
-    if (!busy) timeOut(p); // an animation in progress finishes first
+    // an animation in progress finishes first; online, the room decides (its word comes as "end")
+    if (!busy && match.mode !== 'online') timeOut(p);
     return;
   }
   if (tt.phase !== 'byoyomi' || p !== mySide()) return;
@@ -298,6 +327,8 @@ let titleView: TitleView = 'main';
 const tag = (s: string): string => (s ? `<small>${s}</small>` : '');
 
 function renderTitle(): void {
+  // back to the title from an online game: its room is left for good
+  leaveRoom();
   teardownGame();
   teardownTitle();
   titleView = 'main';
@@ -322,10 +353,13 @@ function mountTitleUI(settled: boolean): void {
   titleUiCleanup = null;
   host.querySelectorAll('[data-title-ui]').forEach(el => el.remove());
   host.classList.toggle('settled', settled);
+  const ads = adsOn();
+  host.classList.toggle('has-ad', ads);
   const T = t().title;
   const cur = LANGS.find(l => l.id === getLang()) ?? LANGS[0];
   host.insertAdjacentHTML('beforeend', `
     <div class="title-lang" data-title-ui>
+      <span class="lang-cap" aria-hidden="true">Language</span>
       <button type="button" class="corner-toggle lang-toggle" aria-haspopup="menu" aria-expanded="false" aria-controls="lang-menu" aria-label="Language / 言語" title="Language / 言語">${icon('globe')}<span>${cur.name}</span></button>
       <div class="corner-menu lang-menu" id="lang-menu" role="menu" aria-label="Language / 言語" hidden>
         ${LANGS.map(l => `<button type="button" role="menuitemradio" aria-checked="${l.id === cur.id}" data-lang="${l.id}" lang="${l.id}"><span>${l.name}</span>${l.id === cur.id ? icon('check') : ''}</button>`).join('')}
@@ -346,8 +380,10 @@ function mountTitleUI(settled: boolean): void {
       </div>
       <nav class="menu" aria-label="${T.modesAria}"></nav>
     </div>
-    <footer class="title-foot" data-title-ui>${T.foot(APP_VERSION)}</footer>`);
+    <footer class="title-foot" data-title-ui>${T.foot(APP_VERSION)}</footer>
+    ${adSlot('title', undefined, 'data-title-ui')}`);
   renderTitleMenu(settled);
+  if (ads) fillAds(host);
 
   const cleanups = [
     setupDropdown(host.querySelector('.title-corner') as HTMLElement, b => {
@@ -777,12 +813,12 @@ function openCodeJoin(): void {
     ctrl = new AbortController();
     online.joinRoom(code, ctrl.signal).then(
       found => {
-        if (found) { m.close(); announceMatch(found); return; }
+        if (found !== 'nocode' && found !== 'limit') { m.close(); announceMatch(found); return; }
         joining = false;
         input.disabled = false;
         setActionsBusy(m, false);
         sync();
-        err.textContent = O.codeNotFound;
+        err.textContent = found === 'limit' ? O.codeTooMany : O.codeNotFound;
         sound.invalid();
         input.focus();
       },
@@ -791,9 +827,19 @@ function openCodeJoin(): void {
   }
 }
 
-/** The opponent is found: who plays 〇 (先手) and × (後手), then the game starts by itself. */
-function announceMatch(found: MatchFound): void {
+/**
+ * The opponent is found: who plays 〇 (先手) and × (後手), then the game starts by itself.
+ * The room is joined at once (a rematch keeps its room), so it is ready when the countdown ends.
+ */
+function announceMatch(found: MatchFound, existing?: GameLink): void {
   const O = t().online;
+  const link = existing ?? online.connect(found);
+  earlyState = null;
+  let failed: NetErrorCode | null = null;
+  link.on({
+    state: s => { earlyState = s; },
+    failed: code => { failed = code; },
+  });
   const card = (p: Player): string => {
     const mine = p === found.me;
     return `<div class="vs-card ${p.toLowerCase()}${mine ? ' me' : ''}">
@@ -823,7 +869,8 @@ function announceMatch(found: MatchFound): void {
     }
     window.clearInterval(timer);
     m.close();
-    startGame({ mode: 'online', found, clock: newClock(ONLINE_CLOCK), undos: 0 });
+    if (failed) { showNetError(new NetError(failed)); return; }
+    startGame({ mode: 'online', found, clock: newClock(ONLINE_CLOCK), undos: 0, link });
   }, 1000);
 }
 
@@ -906,34 +953,62 @@ function openRanking(kind: RankingKind): void {
 /** もう一度 after an online game: a new random opponent, or a rematch with the same one (合言葉). */
 function onlineAgain(): void {
   if (match.mode !== 'online') return;
-  const found = match.found;
-  if (found.kind === 'random') openMatching();
-  else requestRematch(found);
+  const { found, link } = match;
+  // the mated player who plays again is done checking the board
+  if (reviewUntil) { link.accept(); reviewUntil = 0; }
+  if (found.kind === 'random') { link.leave(); openMatching(); return; }
+  requestRematch(found, link);
 }
 
-function requestRematch(prev: MatchFound): void {
+function requestRematch(prev: MatchFound, link: GameLink): void {
   const O = t().online;
-  const ctrl = new AbortController();
+  if (oppLeft) { showRematchLeft(); return; }
   const m = openModal({
     title: O.rematchTitle, subtitle: O.rematchTag, className: 'net-modal',
     content: `<div class="net-wait"><span class="cpu-orb" aria-hidden="true"></span><div><b>${O.rematchWaiting}</b>${dots}<small>${prev.opponent}</small></div></div>`,
     actions: [{ label: O.stop, kind: 'ghost' }],
-    onClose: () => ctrl.abort(),
+    // stopped waiting: the request is taken back
+    onClose: () => { if (rematchWait) { rematchWait = null; link.withdraw(); } },
   });
-  online.rematch(prev, ctrl.signal).then(
-    found => {
-      m.close();
-      if (found) { announceMatch(found); return; }
-      openModal({
-        title: O.rematchTitle, content: `<p>${O.rematchLeft}</p>`,
-        actions: [
-          { label: t().common.toTitle, kind: 'ghost', onClick: () => { renderTitle(); } },
-          { label: t().common.close, kind: 'primary' },
-        ],
-      });
-    },
-    e => { if (isAbort(e)) return; m.close(); showNetError(e, () => requestRematch(prev)); },
-  );
+  rematchWait = {
+    found: f => { m.close(); announceMatch(f, link); },
+    left: () => { m.close(); showRematchLeft(); },
+  };
+  link.rematch();
+}
+
+/** 合言葉 games, in the result window: your opponent asks for a rematch, or has left. */
+function resultNote(): string {
+  if (match.mode !== 'online' || match.found.kind !== 'code' || gs.status === 'playing') return '';
+  const O = t().online;
+  if (oppLeft) return `<p class="result-note">${O.rematchLeft}</p>`;
+  if (oppWantsRematch) return `<p class="result-note on" role="status">${icon('refresh')}${O.rematchAsked}</p>`;
+  return '';
+}
+function updateResultNote(): void {
+  const box = resultModal?.el.querySelector('.result');
+  if (!box) return;
+  box.querySelector('.result-note')?.remove();
+  box.insertAdjacentHTML('beforeend', resultNote());
+}
+
+function showRematchLeft(): void {
+  const O = t().online;
+  openModal({
+    title: O.rematchTitle, content: `<p>${O.rematchLeft}</p>`,
+    actions: [
+      { label: t().common.toTitle, kind: 'ghost', onClick: () => { renderTitle(); } },
+      { label: t().common.close, kind: 'primary' },
+    ],
+  });
+}
+
+/** Leaving an online game's room for good (to the title). */
+function leaveRoom(): void {
+  if (match.mode !== 'online') return;
+  if (reviewUntil) match.link.accept();
+  match.link.leave();
+  rematchWait = null;
 }
 
 /** 降参: confirm, then the game is lost. */
@@ -947,15 +1022,17 @@ function confirmResign(): void {
       {
         label: O.resignYes, kind: 'danger', onClick: () => {
           const me = mySide();
-          if (me) setTimeout(() => endOnline(me, 'resign'), 0);
+          if (!me || match.mode !== 'online') return;
+          match.link.resign();
+          setTimeout(() => endOnline(me, 'resign'), 0);
         },
       },
     ],
   });
 }
 
-/** An online game ends without a move: 降参, or a connection that did not come back. */
-function endOnline(loser: Player, reason: 'resign' | 'disconnect'): void {
+/** An online game ends without a move: 降参, time, or a connection that did not come back. */
+function endOnline(loser: Player | null, reason: 'resign' | 'disconnect' | 'timeout'): void {
   if (!ui || gs.status !== 'playing' || match.mode !== 'online') return;
   // an animation in progress finishes first: it would otherwise write over the result
   if (busy) { setTimeout(() => endOnline(loser, reason), 100); return; }
@@ -964,7 +1041,7 @@ function endOnline(loser: Player, reason: 'resign' | 'disconnect'): void {
   oppDropUntil = 0;
   selfDropUntil = 0;
   renderNetState();
-  gs = { ...gs, status: `win:${other(loser)}`, winReason: reason };
+  gs = { ...gs, status: loser ? `win:${other(loser)}` : 'draw', winReason: reason };
   if (phase === 'step1-move-from') phase = 'step1';
   selectedFrom = null;
   selectedMove = null;
@@ -973,13 +1050,12 @@ function endOnline(loser: Player, reason: 'resign' | 'disconnect'): void {
 }
 
 /** A connection dropped (or came back). The clocks keep running; 60 s without it loses the game. */
-function setDrop(who: 'opp' | 'self', on: boolean): void {
-  if (!ui || match.mode !== 'online' || gs.status !== 'playing') return;
-  const until = on ? performance.now() + RECONNECT_MS : 0;
+function setDrop(who: 'opp' | 'self', on: boolean, ms = RECONNECT_MS): void {
+  if (!ui || match.mode !== 'online') return;
+  const until = on && gs.status === 'playing' ? performance.now() + ms : 0;
   if (who === 'opp') oppDropUntil = until;
   else selfDropUntil = until;
   renderNetState();
-  if (!on) maybeStartCpu();
 }
 
 /** The banner (your opponent dropped) and the cover (you dropped), with their countdowns. */
@@ -1018,11 +1094,10 @@ function onlineTick(): void {
   const now = performance.now();
   if (oppDropUntil || selfDropUntil) {
     renderNetState();
+    // your own connection did not come back in time: the room has decided the same.
+    // (Your opponent's: the room says so itself.)
     const me = mySide();
-    if (me && gs.status === 'playing' && !busy) {
-      if (selfDropUntil && now >= selfDropUntil) endOnline(me, 'disconnect');
-      else if (oppDropUntil && now >= oppDropUntil) endOnline(other(me), 'disconnect');
-    }
+    if (me && gs.status === 'playing' && !busy && selfDropUntil && now >= selfDropUntil) endOnline(me, 'disconnect');
   }
   if (reviewUntil) {
     const text = reviewLeftText();
@@ -1041,29 +1116,347 @@ function reviewLeftText(): string {
   return t().online.reviewLeft(Math.max(0, Math.ceil((reviewUntil - performance.now()) / 1000)));
 }
 
-/** Online: you mated your opponent, who may check the board for up to 30 s (the stand-in takes a few). */
-async function waitForOpponentReview(u: GameUI): Promise<void> {
+/**
+ * Online: you mated your opponent, who may check the board for up to 30 s. Resolves when the
+ * room says the result is final, or that they challenged the call (the game goes on).
+ */
+async function waitForOpponentReview(u: GameUI): Promise<'final' | 'playOn' | 'gone'> {
   const O = t().online;
-  const start = performance.now();
-  const until = start + MATE_REVIEW_MS;
-  const accepted = start + 2500 + Math.random() * 3500;
+  const until = performance.now() + MATE_REVIEW_MS;
+  const st: { how: 'final' | 'playOn' | 'gone' | null } = { how: null };
+  reviewWait = how => { st.how = how; };
   waitModal = openModal({
     content: `<div class="net-wait"><span class="cpu-orb" aria-hidden="true"></span><div><b>${O.oppReviewing}</b>${dots}
       <small data-opp-review>${O.oppReviewLeft(fmtClock(MATE_REVIEW_MS))}</small></div></div>`,
     className: 'net-modal wait-modal', closable: false,
   });
-  while (ui === u && performance.now() < Math.min(until, accepted)) {
+  while (ui === u && st.how === null) {
     const el = waitModal?.el.querySelector<HTMLElement>('[data-opp-review]');
     if (el) el.textContent = O.oppReviewLeft(fmtClock(until - performance.now()));
+    // the room has surely decided by now; if its word is lost, the result stands
+    if (performance.now() > until + 8000) st.how = 'final';
     await pause(200);
   }
+  reviewWait = null;
   waitModal?.close();
   waitModal = null;
+  return st.how ?? 'gone';
 }
 
-/** The stand-in waits while a connection is down (a real opponent's moves would arrive once it is back). */
-async function untilConnected(alive: () => boolean): Promise<void> {
-  while (alive() && (oppDropUntil || selfDropUntil)) await pause(200);
+// ── The room's messages ──
+
+/** The turn played from position `ply` on this screen, if it is in the record (a turn still in progress is not). */
+function localTurnAt(ply: number): Turn | null {
+  const e = log.find(x => x.ply === ply + 1 && x.cube !== null);
+  return e ? { step1: e.step1, cube: e.cube as CubeMove } : null;
+}
+/** The turn from position `ply` is 〇's when ply is even (〇 always moves first). */
+const moverAt = (ply: number): Player => (ply % 2 === 0 ? 'O' : 'X');
+
+const sameStep1 = (a: Step1Action, b: Step1Action): boolean =>
+  a.kind === 'place' ? b.kind === 'place' && a.index === b.index : b.kind === 'move' && a.from === b.from && a.to === b.to;
+const sameTurn = (a: Turn, b: Turn): boolean => sameStep1(a.step1, b.step1) && movesEqual(a.cube, b.cube);
+
+/** The room keeps the time: its clocks replace this screen's. `at`: when its message arrived. */
+function syncClock(clock: ClockSync, at: number): void {
+  if (match.mode !== 'online') return;
+  const c = match.clock;
+  c.left = { O: clock.left.O, X: clock.left.X };
+  c.used = clock.used + (performance.now() - at);
+  tcSince = performance.now();
+  tcRunning = !!ui && gs.status === 'playing';
+  tcHold = false;
+  renderClocks();
+}
+
+/** Listens to the room for the game on screen. */
+function attachLink(link: GameLink): void {
+  link.on({
+    state: s => queueNet({ k: 'state', state: s, at: performance.now() }),
+    turn: tm => {
+      // your own turn coming back: only the clocks change (even while its animation runs)
+      const lt = match.mode === 'online' && tm.by === match.found.me ? localTurnAt(tm.ply) : null;
+      if (lt && sameTurn(lt, tm)) { syncClock(tm.clock, performance.now()); return; }
+      queueNet({ k: 'turn', turn: tm, at: performance.now() });
+    },
+    playOn: clock => queueNet({ k: 'playOn', clock, at: performance.now() }),
+    end: e => queueNet({ k: 'end', end: e, at: performance.now() }),
+    drop: (who, ms) => { if (who !== mySide()) setDrop('opp', true, ms); },
+    back: who => { if (who !== mySide()) setDrop('opp', false); },
+    rematchAsked: () => {
+      oppWantsRematch = true;
+      if (rematchWait) return;
+      // said in the result window when it is open (a toast would sit behind it)
+      if (resultModal) updateResultNote();
+      else toast(t().online.rematchAsked);
+    },
+    match: found => {
+      const w = rematchWait;
+      rematchWait = null;
+      if (w) w.found(found);
+      else announceMatch(found, link);
+    },
+    left: () => {
+      oppLeft = true;
+      const w = rematchWait;
+      rematchWait = null;
+      w?.left();
+      updateResultNote();
+    },
+    connection: up => setDrop('self', !up),
+    failed: code => onLinkFailed(code),
+  });
+}
+
+function queueNet(ev: NetEvent): void {
+  netQueue.push(ev);
+  void pumpNet();
+}
+
+/** Plays the room's messages in order, each after the animation in progress. */
+async function pumpNet(): Promise<void> {
+  if (netBusy) return;
+  netBusy = true;
+  try {
+    while (netQueue.length && ui && match.mode === 'online') {
+      if (busy) { await pause(60); continue; }
+      const ev = netQueue.shift() as NetEvent;
+      if (ev.k === 'turn') await applyServerTurn(ev.turn, ev.at);
+      else if (ev.k === 'playOn') onServerPlayOn(ev.clock, ev.at);
+      else if (ev.k === 'end') await onServerEnd(ev.end, ev.at);
+      else await applyServerState(ev.state, ev.at);
+    }
+  } finally {
+    netBusy = false;
+  }
+}
+
+/** A turn from the room: your opponent's move is shown; your own is already on the board. */
+async function applyServerTurn(tm: TurnMsg, at: number): Promise<void> {
+  if (match.mode !== 'online') return;
+  const link = match.link;
+  const lt = localTurnAt(tm.ply);
+  if (lt) {
+    if (sameTurn(lt, tm)) syncClock(tm.clock, at);
+    else link.sync(); // the two views differ: ask for the whole game
+    return;
+  }
+  if (tm.ply < gs.ply) { syncClock(tm.clock, at); return; } // from before this screen's record
+  if (tm.ply > gs.ply || gs.status !== 'playing' || gs.current !== tm.by) { link.sync(); return; }
+  if (tm.by === match.found.me && phase !== 'step1') { link.sync(); return; }
+  await showRemoteTurn(tm);
+  syncClock(tm.clock, at);
+}
+
+/** Your opponent's turn, shown at a readable pace: point at the cell (or lift the piece) → place / move → the cube move. */
+async function showRemoteTurn(tm: Turn): Promise<void> {
+  const u = ui;
+  if (!u) return;
+  cpuActing = true;
+  selectedMove = null;
+  hoverMove = null;
+  refresh();
+  const alive = (): boolean => ui === u && match.mode === 'online';
+  const say = (desc: string): string => t().hud.liveOpp(desc);
+  const a = tm.step1;
+  if (a.kind === 'place') {
+    u.scene.setHover(a.index, gs.current);
+    u.schematic.setHover(a.index);
+    await wait(300);
+    if (!alive()) return;
+    u.scene.setHover(null, null);
+    u.schematic.setHover(null);
+    u.live.textContent = say(describeStep1(a, getLang()));
+    await doPlace(a.index);
+  } else {
+    u.scene.setSelected(a.from);
+    sound.select();
+    await wait(380);
+    if (!alive()) return;
+    u.live.textContent = say(describeStep1(a, getLang()));
+    await doMove(a.from, a.to);
+  }
+  if (!alive()) return;
+  if (gs.status !== 'playing') { cpuActing = false; return; }
+  selectedMove = tm.cube;
+  sound.preview();
+  updatePreview();
+  u.live.textContent = say(describeMove(tm.cube, getLang()));
+  await wait(700);
+  if (!alive()) return;
+  cpuActing = false;
+  applyingRemote = true;
+  try {
+    await doCubeMove(tm.cube);
+  } finally {
+    applyingRemote = false;
+  }
+}
+
+/** After 詰み the game goes on with the mated player to move (誤審の訂正). */
+function resumeAfterMate(): void {
+  if (!ui) return;
+  resultModal?.close();
+  resultModal = null;
+  reviewing = false;
+  reviewUntil = 0;
+  if (recorded) { // the result is counted when that turn ends
+    recordResult(recorded.level, recorded.result, { undos: 0, undo: true });
+    recorded = null;
+  }
+  const next: GameState = { ...gs, status: 'playing' };
+  delete next.winReason;
+  gs = next;
+  const last = log[log.length - 1];
+  if (last?.result) {
+    const entry: LogEntry = { ...last };
+    delete entry.result;
+    log = [...log.slice(0, -1), entry];
+  }
+  phase = 'step1';
+  selectedFrom = null;
+  selectedMove = null;
+  clockOn();
+  refresh();
+  announceTurn();
+  tcStart();
+}
+
+/** The room says the mated player challenged the call: play goes on. */
+function onServerPlayOn(clock: ClockSync, at: number): void {
+  if (match.mode !== 'online' || !ui) return;
+  // your own challenge is already in play
+  if (gs.status !== 'playing') {
+    if (gs.winReason !== 'mate') { match.link.sync(); return; }
+    const w = reviewWait;
+    reviewWait = null;
+    w?.('playOn');
+    resumeAfterMate();
+    toast(t().online.oppChallenged);
+  }
+  syncClock(clock, at);
+}
+
+/** The room's final word on the result. */
+async function onServerEnd(e: EndMsg, at: number): Promise<void> {
+  if (match.mode !== 'online' || !ui) return;
+  netFinal = true;
+  syncClock(e.clock, at);
+  const status: GameState['status'] = e.winner ? `win:${e.winner}` : 'draw';
+  if (gs.status === 'playing') {
+    // it ended without a move on this screen: 降参, time, or a lost connection
+    if (e.reason === 'resign' || e.reason === 'disconnect' || e.reason === 'timeout') {
+      endOnline(e.winner ? other(e.winner) : null, e.reason);
+    } else {
+      match.link.sync();
+    }
+    return;
+  }
+  const w = reviewWait;
+  reviewWait = null;
+  if (gs.status !== status || gs.winReason !== e.reason) {
+    // the room decided otherwise (e.g. your last move came too late): its result stands
+    gs = { ...gs, status, winReason: e.reason };
+    reviewing = false;
+    reviewUntil = 0;
+    refresh();
+    if (!w) showResult();
+  }
+  if (w) { w('final'); return; } // finishGame shows the result
+  if (reviewUntil) {
+    // your time to check the board is over
+    reviewUntil = 0;
+    reviewing = false;
+    selectedMove = null;
+    showResult();
+  }
+}
+
+/** The room's whole game (on joining, after coming back, or to correct this screen). */
+async function applyServerState(s: GameSnapshot, at: number): Promise<void> {
+  if (match.mode !== 'online' || !ui) return;
+  // the room's turns are those from position `base` on (0 on the server)
+  const base = s.ply - s.turns.length;
+  let same = true;
+  for (let i = 0; i < s.turns.length && same; i++) {
+    const lt = localTurnAt(base + i);
+    if (lt) same = sameTurn(lt, s.turns[i]);
+  }
+  const here = gs.ply;
+  // your last turn may not have reached the room yet: it is sent again
+  const pendingMine = same && here === s.ply + 1 && moverAt(s.ply) === match.found.me;
+  if (same && s.ply > here && here >= base && phase !== 'step2') {
+    // turns played while this screen was away: shown one by one
+    for (const tm of s.turns.slice(here - base)) {
+      if (gs.status !== 'playing') resumeAfterMate();
+      await showRemoteTurn(tm);
+      if (!ui || match.mode !== 'online') return;
+    }
+  } else if ((!same || (s.ply !== here && !pendingMine)) && base === 0) {
+    rebuildFrom(s);
+  }
+  if (s.phase === 'over' && s.result) {
+    if (gs.status === 'playing') {
+      endOnline(s.result.winner ? other(s.result.winner) : null, s.result.reason === 'timeout' || s.result.reason === 'resign' ? s.result.reason : 'disconnect');
+    }
+    netFinal = true;
+  } else if (s.phase === 'play' && gs.status !== 'playing' && !pendingMine) {
+    resumeAfterMate();
+  } else if (s.phase === 'review' && s.review !== null && gs.status !== 'playing' && gs.current === match.found.me) {
+    reviewUntil = performance.now() + s.review;
+  }
+  syncClock(s.clock, at);
+  setDrop('opp', s.drop !== null, s.drop ?? 0);
+  oppLeft = s.left;
+}
+
+/** This screen cannot follow the room: the game is rebuilt from the room's turns, without animation. */
+function rebuildFrom(s: GameSnapshot): void {
+  if (!ui) return;
+  let state: GameState = { ...initialGameState(), current: 'O', settings: { turnLimit: null } };
+  const entries: LogEntry[] = [];
+  s.turns.forEach((tm, i) => {
+    entries.push({ ply: state.ply + 1, player: state.current, step1: tm.step1, cube: tm.cube });
+    let next = applyFullTurn(state, tm.step1, tm.cube);
+    // a 詰み that more turns follow was challenged (誤審の訂正): play went on
+    if (next.status !== 'playing' && next.winReason === 'mate' && i < s.turns.length - 1) {
+      next = { ...next, status: 'playing' };
+      delete next.winReason;
+    }
+    state = next;
+  });
+  if (s.phase === 'play' && state.status !== 'playing') {
+    state = { ...state, status: 'playing' };
+    delete state.winReason;
+  }
+  cancelCpu();
+  resultModal?.close();
+  resultModal = null;
+  gs = state;
+  log = entries;
+  history = [];
+  phase = 'step1';
+  selectedFrom = null;
+  selectedMove = null;
+  hoverMove = null;
+  lastMoved = null;
+  reviewing = false;
+  ui.scene.clearWin();
+  refresh();
+}
+
+/** The room cannot be reached any more (or this page is out of date). */
+function onLinkFailed(code: NetErrorCode): void {
+  if (match.mode !== 'online' || !ui) return;
+  oppLeft = true;
+  const w = rematchWait;
+  rematchWait = null;
+  w?.left();
+  reviewWait?.('gone');
+  reviewWait = null;
+  if (code === 'outdated') showNetError(new NetError('outdated'));
+  const me = mySide();
+  if (me && gs.status === 'playing') endOnline(me, 'disconnect');
 }
 
 /** 設定 → ネット対戦: your name, the terms, and deleting your online data. */
@@ -1108,19 +1501,45 @@ function devHooks(): void {
   if (!import.meta.env.DEV) return;
   (window as unknown as { __cube6: unknown }).__cube6 = {
     net: previewConfig,
-    dropOpponent: (on = true): void => setDrop('opp', on),
-    dropSelf: (on = true): void => setDrop('self', on),
-    /** Your opponent presses 降参. */
-    oppResign: (): void => {
-      const me = mySide();
-      if (me) endOnline(other(me), 'resign');
+    /** A connection drops (true) or comes back (false). With a real server only your own breaks (and comes back by itself). */
+    dropOpponent: (on = true): void => previewRoom()?.debugDrop('opp', on),
+    dropSelf: (on = true): void => {
+      const room = previewRoom();
+      if (room) room.debugDrop('self', on);
+      else if (on) breakServerLink();
     },
+    /** What the game on screen looks like (for test scripts). */
+    view: (): object => ({
+      me: mySide(), ply: gs.ply, status: gs.status, reason: gs.winReason ?? null, current: gs.current, phase, busy,
+      oppTurn: isOppTurn(), reviewing, reviewUntil: reviewUntil > 0, oppDrop: oppDropUntil > 0, selfDrop: selfDropUntil > 0,
+      clock: match.mode === 'online' ? { left: { ...match.clock.left }, used: Math.round(tcUsed(match.clock)) } : null,
+      result: document.querySelector('.result-modal .result-title')?.textContent ?? null,
+    }),
+    /** Plays one of your turns: the first legal one that does not end the game at once (or any, if none). */
+    autoTurn: async (): Promise<boolean> => {
+      if (!ui || busy || gs.status !== 'playing' || isOppTurn() || phase !== 'step1') return false;
+      const s = gs;
+      const s1s: Step1Action[] = legalPlacements(s).map(index => ({ kind: 'place', index }) as Step1Action);
+      if (!s1s.length) for (const m of legalMoves(s)) s1s.push({ kind: 'move', from: m.from, to: m.to });
+      const keep = s1s.flatMap(step1 => allCubeMoves().map(cube => ({ step1, cube })))
+        .find(x => applyFullTurn(s, x.step1, x.cube).status === 'playing');
+      const pick = keep ?? (s1s.length ? { step1: s1s[0], cube: allCubeMoves()[0] } : null);
+      if (!pick) return false;
+      if (pick.step1.kind === 'place') await doPlace(pick.step1.index);
+      else await doMove(pick.step1.from, pick.step1.to);
+      await doCubeMove(pick.cube);
+      return true;
+    },
+    /** Your opponent presses 降参. */
+    oppResign: (): void => previewRoom()?.debugResign(),
     netError: (code: NetErrorCode): void =>
       showNetError(new NetError(code, code === 'paused' ? rankingPeriod('daily', Date.now()).end : null), () => undefined),
-    /** Puts a saved position (the cube6-save format) into the online game in progress. */
+    /** Puts a saved position (the cube6-save format) into the online game in progress (stand-in rooms only). */
     loadPosition: (raw: unknown): boolean => {
       const s = parseSave(raw);
-      if (!s || !ui || match.mode !== 'online' || busy) return false;
+      const room = previewRoom();
+      if (!s || !ui || match.mode !== 'online' || busy || !room) return false;
+      room.debugLoad(s.gameState);
       cancelCpu();
       gs = s.gameState;
       phase = s.phase;
@@ -1349,10 +1768,22 @@ function startGame(m: GameMatch = match): void {
   reviewUntil = 0;
   oppDropUntil = 0;
   selfDropUntil = 0;
+  netQueue = [];
+  netFinal = false;
+  reviewWait = null;
+  rematchWait = null;
+  oppLeft = false;
+  oppWantsRematch = false;
   if (match.mode !== 'online') clearSave();
   if (!renderGame()) return;
   clockOn();
   tcStart();
+  if (match.mode === 'online') {
+    attachLink(match.link);
+    // the room's word from the countdown: its clocks (and anything already played)
+    if (earlyState) queueNet({ k: 'state', state: earlyState, at: performance.now() });
+    earlyState = null;
+  }
   sound.start();
   setTimeout(() => announceTurn(), 300);
 }
@@ -1388,8 +1819,8 @@ function renderGame(): boolean {
   peekLast = false;
   cpuActing = false;
   cpuToken++;
-  // online, the stand-in opponent plays with the CPU's engine until the server exists
-  cpu = match.mode === 'local' ? null : new CpuClient();
+  // the CPU's engine (online, the opponent's moves come from the room)
+  cpu = match.mode === 'cpu' ? new CpuClient() : null;
   tcRunning = false;
   tcHold = false;
   tcAnnounced = -1;
@@ -1397,8 +1828,11 @@ function renderGame(): boolean {
 
   const G = t().game;
   const net = match.mode === 'online';
+  // the ad banner above the top bar shows on PCs only (style.css, "Ads")
+  const ads = adsOn();
   root.innerHTML = `
-    <div class="game" data-turn="${gs.current}">
+    <div class="game${ads ? ' has-ad' : ''}" data-turn="${gs.current}">
+      ${adSlot('game')}
       <header class="topbar">
         <button type="button" class="brand" data-act="home" title="${G.toTitleTip}">CUBE<b>6</b></button>
         <div class="hud" id="hud">
@@ -1452,6 +1886,7 @@ function renderGame(): boolean {
     stage.querySelector('button')?.addEventListener('click', () => renderTitle());
     return false;
   }
+  if (ads) fillAds(el);
   const schematic = new Schematic(el.querySelector('#schematic') as HTMLElement);
   const controls = new Controls(el.querySelector('#controls') as HTMLElement);
   // mobile: the pinned board sits right under the (wrapping) top bar
@@ -1511,6 +1946,9 @@ function teardownGame(): void {
   cpu = null;
   window.clearInterval(tcTicker);
   tcTicker = 0;
+  netQueue = [];
+  reviewWait?.('gone');
+  reviewWait = null;
   waitModal?.close();
   waitModal = null;
   if (!ui) return;
@@ -1555,8 +1993,10 @@ function nameOf(p: Player): string {
   if (match.mode === 'online') return p === match.found.me ? t().common.you : match.found.opponent;
   return p === 'O' ? 'PLAYER 1' : 'PLAYER 2';
 }
-/** Human input is blocked during animations and while the CPU plays its turn. */
-function locked(): boolean { return busy || cpuActing; }
+/** The other side has the move: the CPU's turn, or an online opponent's (thinking, or its move being shown). */
+function oppActing(): boolean { return cpuActing || (match.mode === 'online' && isOppTurn()); }
+/** Human input is blocked during animations and while the other side plays its turn. */
+function locked(): boolean { return busy || oppActing(); }
 
 /** Label of step ① for the current turn ("配置" or "移動"). */
 function step1Label(): string {
@@ -1659,7 +2099,7 @@ function refresh(): void {
   el.dataset['turn'] = gs.current;
   el.classList.toggle('over', gs.status !== 'playing');
   el.classList.toggle('reviewing', reviewing);
-  el.classList.toggle('cpu-turn', cpuActing);
+  el.classList.toggle('cpu-turn', oppActing());
   scene.setTurn(gs.current);
   scene.setBoard(gs.board);
   scene.setLastMoved(lastMoved);
@@ -1679,7 +2119,7 @@ function refresh(): void {
     nextLevel: nextLevelOf() !== null,
     names: { O: nameOf('O'), X: nameOf('X') },
     cpu: match.mode === 'cpu' ? { side: other(match.human), label: levelLabel(match.level), acting: cpuActing }
-      : match.mode === 'online' ? { side: other(match.found.me), label: match.found.opponent, acting: cpuActing, online: true }
+      : match.mode === 'online' ? { side: other(match.found.me), label: match.found.opponent, acting: oppActing(), online: true }
       : null,
     reviewLeft: reviewing && match.mode === 'online' && reviewUntil ? reviewLeftText() : null,
     check: checked
@@ -1792,7 +2232,7 @@ function hudStatus(): { main: string; sub: string; cls: string } {
   const steps = `<span class="st ${s1 ? 'on' : 'done'}">①${step1Label()}</span><span class="st ${s1 ? '' : 'on'}">②${H.cube}</span>`;
   const checked = inCheck(gs);
   if (isOppTurn()) {
-    const thinking = cpuActing && s1 ? '<span class="think-dots"><i></i><i></i><i></i></span>' : '';
+    const thinking = oppActing() && s1 ? '<span class="think-dots"><i></i><i></i><i></i></span>' : '';
     // the other side being in check is your 王手: a small mark, not the highlight
     const badge = checked ? `<span class="hud-badge">${H.checkBadge}</span>` : '';
     // the CPU is always × (red); an online opponent may be either colour
@@ -1841,7 +2281,7 @@ function toast(msg: string, kind: 'info' | 'warn' = 'info'): void {
 // ── Board interaction ──────────────────────────────────────────────────────
 function onCellHover(i: number | null): void {
   if (!ui) return;
-  if (cpuActing) return; // the CPU's own hover marker is showing
+  if (oppActing()) return; // the other side's turn (its own hover marker may be showing)
   let ghost: Player | null = null;
   if (i !== null && !busy && gs.status === 'playing' && gs.board[i] === null
     && ((phase === 'step1' && canPlaceNow()) || (phase === 'step1-move-from' && selectedFrom !== null))) {
@@ -1854,7 +2294,7 @@ function onCellHover(i: number | null): void {
 function onCellClick(i: number | null, raw: number | null): void {
   sound.unlock();
   if (!ui || gs.status !== 'playing') return;
-  if (cpuActing) {
+  if (oppActing()) {
     if (raw !== null && performance.now() - lastBusyToast > 2500) {
       lastBusyToast = performance.now();
       toast(match.mode === 'online' ? t().toast.oppTurn : t().toast.cpuTurn);
@@ -1981,6 +2421,8 @@ async function doCubeMove(move: CubeMove): Promise<void> {
   const u = ui;
   if (!u || busy || phase !== 'step2' || gs.status !== 'playing') return;
   if (!legalCubeMoves(gs).some(m => movesEqual(m, move))) { sound.invalid(); return; }
+  const mover = gs.current;
+  const plyBefore = gs.ply;
   tcEndTurn(gs.current); // the turn is over once the cube move is confirmed
   pushHistory();
   sound.confirm();
@@ -1994,6 +2436,10 @@ async function doCubeMove(move: CubeMove): Promise<void> {
   const perm = movePermutation(move);
   const lastEntry = log[log.length - 1];
   if (lastEntry && lastEntry.cube === null) log = [...log.slice(0, -1), { ...lastEntry, cube: move }];
+  // online: your turn goes to the room at once (your opponent's, being shown, came from it)
+  if (match.mode === 'online' && !applyingRemote && mover === match.found.me && lastEntry) {
+    match.link.turn(plyBefore, { step1: lastEntry.step1, cube: move });
+  }
 
   await wait(80);
   if (ui !== u) return;
@@ -2054,13 +2500,11 @@ async function finishGame(): Promise<void> {
   if (ui !== u) return;
   setBusy(false);
   refresh();
-  if (match.mode === 'online') {
-    // you mated your opponent: they may check the board before the result is final
-    if (gs.winReason === 'mate' && happy) {
-      await waitForOpponentReview(u);
-      if (ui !== u) return;
-    }
-    online.reportResult(match.found, happy);
+  // online: you mated your opponent, who may check the board before the result is final
+  // (the room keeps the result; nothing is recorded on this device)
+  if (match.mode === 'online' && gs.winReason === 'mate' && happy && !netFinal) {
+    const how = await waitForOpponentReview(u);
+    if (ui !== u || how === 'playOn') return; // they challenged the call: the game goes on
   }
   showResult();
 }
@@ -2085,30 +2529,9 @@ function reviewBoard(): void {
  */
 function playOn(): void {
   if (!ui || busy || !canPlayOn()) return;
-  resultModal?.close();
-  resultModal = null;
-  reviewing = false;
-  reviewUntil = 0;
-  if (recorded) { // the result is counted when that turn ends
-    recordResult(recorded.level, recorded.result, { undos: 0, undo: true });
-    recorded = null;
-  }
-  const next: GameState = { ...gs, status: 'playing' };
-  delete next.winReason;
-  gs = next;
-  const last = log[log.length - 1];
-  if (last?.result) {
-    const entry: LogEntry = { ...last };
-    delete entry.result;
-    log = [...log.slice(0, -1), entry];
-  }
-  phase = 'step1';
-  selectedFrom = null;
-  selectedMove = null;
-  clockOn();
-  refresh();
-  announceTurn();
-  tcStart();
+  // online, the room is told; its clock runs from now
+  if (match.mode === 'online') match.link.playOn();
+  resumeAfterMate();
 }
 
 /** 次のレベル: a new game against the next stronger CPU, with the same turn order and clock. */
@@ -2121,7 +2544,7 @@ function startNextLevel(): void {
 
 /** 取消 (step ②): take back this turn's placement or move, to make it again. */
 function cancelStep1(): void {
-  if (!ui || busy || cpuActing || phase !== 'step2' || gs.status !== 'playing') return;
+  if (!ui || locked() || phase !== 'step2' || gs.status !== 'playing') return;
   // the snapshot taken just before this turn's step ①
   const snap = history[history.length - 1];
   if (!snap || snap.gameState.ply !== gs.ply || snap.gameState.current !== gs.current) return;
@@ -2159,7 +2582,7 @@ function cancelCpu(): void {
 }
 
 function maybeStartCpu(): void {
-  if (!ui || !cpu || cpuActing || busy || !isOppTurn() || oppDropUntil || selfDropUntil) return;
+  if (!ui || !cpu || cpuActing || busy || !isOppTurn() || match.mode !== 'cpu') return;
   const token = cpuToken;
   setTimeout(() => { if (token === cpuToken) void runCpuTurn(); }, 30);
 }
@@ -2195,13 +2618,12 @@ async function untilNoModal(alive: () => boolean): Promise<void> {
  */
 async function runCpuTurn(): Promise<void> {
   const u = ui, client = cpu;
-  if (!u || !client || cpuActing || busy || !isOppTurn() || match.mode === 'local') return;
-  const net = match.mode === 'online';
-  const level = match.mode === 'cpu' ? match.level : STAND_IN_LEVEL;
+  if (!u || !client || cpuActing || busy || !isOppTurn() || match.mode !== 'cpu') return;
+  const level = match.level;
   const token = ++cpuToken;
   const alive = (): boolean => token === cpuToken && ui === u;
-  /** The CPU waits for your dialogs; an online opponent does not, but stops while a connection is down. */
-  const hold = (): Promise<void> => (net ? untilConnected(alive) : untilNoModal(alive));
+  /** The CPU waits for your dialogs. */
+  const hold = (): Promise<void> => untilNoModal(alive);
   cpuActing = true;
   selectedMove = null;
   hoverMove = null;
@@ -2210,14 +2632,13 @@ async function runCpuTurn(): Promise<void> {
   const step1Done = phase === 'step2';
   const [decision] = await Promise.all([
     client.think(gs, level, step1Done, cpuThinkBudget(level)),
-    // the stand-in takes a person's time to think
-    wait((step1Done ? 450 : 800) + Math.random() * 400 + (net ? 900 + Math.random() * 2200 : 0)),
+    wait((step1Done ? 450 : 800) + Math.random() * 400),
   ]);
   if (!alive()) return;
   if (!decision) { cpuActing = false; refresh(); return; }
   await hold();
   if (!alive()) return;
-  const say = (desc: string): string => (net ? t().hud.liveOpp(desc) : t().hud.liveCpu(desc));
+  const say = (desc: string): string => t().hud.liveCpu(desc);
 
   const me = gs.current;
   if (!step1Done && decision.step1) {
@@ -2258,8 +2679,8 @@ async function runCpuTurn(): Promise<void> {
 // ── Controls panel events ──────────────────────────────────────────────────
 function onControlEvent(e: ControlEvent): void {
   sound.unlock();
-  // while the CPU plays, only the result / navigation stay available
-  if (cpuActing && e.type !== 'showResult' && e.type !== 'replay' && e.type !== 'title') return;
+  // while the other side plays, only the result / navigation stay available
+  if (oppActing() && e.type !== 'showResult' && e.type !== 'replay' && e.type !== 'title') return;
   switch (e.type) {
     case 'hoverMove':
       if (e.move && (!hoverMove || !movesEqual(e.move, hoverMove))) sound.hover();
@@ -2346,7 +2767,7 @@ function onKey(e: KeyboardEvent): void {
   const scene = ui.scene;
   switch (k) {
     case 'Escape':
-      if (cpuActing) break;
+      if (oppActing()) break;
       if (reviewing) cancelMove();
       else if (phase === 'step2') cancelStep1();
       else deselectPiece();
@@ -2437,6 +2858,8 @@ function showResult(): void {
         <div><dt>${TR.elapsed}</dt><dd>${fmtTime(currentElapsed())}</dd></div>
       </dl>
       ${unlock}
+      ${resultNote()}
+      ${adSlot('result')}
     </div>`;
   const actions: ModalAction[] = [
     { label: TC.toTitle, kind: 'ghost', onClick: () => { renderTitle(); } },
@@ -2461,6 +2884,7 @@ function showResult(): void {
     onClose: () => { resultModal = null; },
   });
   resultModal.aside?.querySelector('[data-act="review"]')?.addEventListener('click', () => { sound.click(); reviewBoard(); });
+  fillAds(resultModal.el);
   if (justUnlocked) {
     sound.secret(0.5);
     justUnlocked = false;

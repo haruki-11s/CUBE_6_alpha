@@ -1,10 +1,11 @@
 {
   "name": "cube6",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:online": "vite --mode online --port 5174 --strictPort",
     "build": "tsc -noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run"
